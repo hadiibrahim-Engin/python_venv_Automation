@@ -1,0 +1,53 @@
+# =============================================================================
+# pyproject.uv-sample.toml
+#
+# A pure-uv reference TOML you can swap in to test that auto-detection
+# correctly chooses uv. To use:
+#
+#   1. cp pyproject.toml pyproject.toml.bak
+#   2. cp pyproject.uv-sample.toml pyproject.toml
+#   3. rm -f .setup-config.json   (delete any cached PM choice)
+#   4. .\scripts\setup-core.ps1 -DryRun
+#      => the PM step should print:
+#         decided_by: [tool.uv] section present, no [tool.poetry]
+#         selected:   uv
+#
+# Detection signals present here:
+#   * [project]            - PEP 621 metadata (uv-style)
+#   * [build-system]       - hatchling backend (NOT poetry)
+#   * [tool.uv]            - explicit uv configuration
+#   * NO [tool.poetry.*]   - so the poetry branch never fires
+# =============================================================================
+
+[project]
+name            = "pythonAutomation-uvtest"
+version         = "0.1.0"
+description     = "Pure-uv pyproject for verifying package-manager auto-detection."
+requires-python = ">=3.11, <3.13"
+
+dependencies = [
+    "requests>=2.31",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+# Build backend
+# hatchling is the canonical PEP 621 backend; explicitly NOT poetry.core.
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+# uv configuration
+[tool.uv]
+package           = false
+dev-dependencies  = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
