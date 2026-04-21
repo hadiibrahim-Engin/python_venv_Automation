@@ -131,7 +131,7 @@ function Write-ProjectPth {
 #>
 function Invoke-VenvActivation {
     param([Parameter(Mandatory=$true)][string] $ProjectRoot)
-    $activateScript = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'scripts\activate-venv.ps1'))
+    $activateScript = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'scripts4PythonAutomation\activate-venv.ps1'))
     if (Test-Path -LiteralPath $activateScript -PathType Leaf) {
         Write-Host 'Activating project venv in current shell ...' -ForegroundColor Yellow
         try {
