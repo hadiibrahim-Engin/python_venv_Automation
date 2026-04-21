@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 <#
 .SYNOPSIS
-    Execution facade — uniform PM interface for install, sync, venv, runtime.
+    Execution facade - uniform PM interface for install, sync, venv, runtime.
 
 .DESCRIPTION
     The orchestrator (Setup-Core.psm1) calls ONLY the Invoke-Pm* / Get-Pm*
@@ -65,7 +65,7 @@ function Update-Pip {
         -Quiet `
         -FailureMessage 'pip self-upgrade failed.'
     if (-not $result.Succeeded) {
-        Write-Verbose "pip upgrade exited with code $($result.ExitCode) — continuing."
+        Write-Verbose "pip upgrade exited with code $($result.ExitCode) - continuing."
     }
 }
 
@@ -245,14 +245,6 @@ function Invoke-PmLockDeps {
 .SYNOPSIS
     Synchronizes the lock file with the current pyproject.toml without
     upgrading already-pinned packages.
-
-    UV:     'uv lock'               - adds/removes entries for pyproject.toml
-                                      changes; does not upgrade.
-    Poetry: 'poetry lock --no-update' - same intent, Poetry's documented flag.
-
-    This is Step 8 in the pipeline and runs only when UpdateDependencies=false.
-    It prevents the 'pyproject.toml changed significantly since poetry.lock was
-    last generated' error on the next install step.
 #>
     param([hashtable] $Ctx)
     Assert-SupportedPm -Ctx $Ctx

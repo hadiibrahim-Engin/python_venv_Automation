@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 # =============================================================================
 # Module  : CodeSigning.psm1
-
+#
 # Author  : Hadi Ibrahim
 # =============================================================================
 Set-StrictMode -Version Latest
@@ -14,17 +14,17 @@ $ErrorActionPreference = 'Stop'
 .DESCRIPTION
     Provides:
       - Set-CodeSignerDefaults / Get-CodeSignerDefaults: session-wide defaults for DigiCertUtil path and mode.
-      - Sign-ExeViaDigiCert: sign one or many executables (simple global entry point).
       - Invoke-CodeSigner: low-level DigiCertUtil.exe invoker.
-      - Sign-Files: batch-first then per-file fallback with optional verification.
-      - Get-ExecutableTargets, Sign-VenvScripts, Sign-PoetryShim: convenience helpers.
+      - Set-CodeSignature: batch-first then per-file fallback with optional verification.
+      - Invoke-DigiCertSigning: simple global entry point (path/dir expansion).
+      - Get-ExecutableTargets, Set-VenvScriptSignature, Set-PoetryShimSignature: convenience helpers.
 
     Depends on:
       - UI.psm1 (Write-Banner)
       - NativeCommand.psm1 (Invoke-NativeCommand)
 #>
 
-# Bring in shared helpers (Document: "UI.psm1", "NativeCommand.psm1")
+# Bring in shared helpers
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1') -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
@@ -46,6 +46,7 @@ $script:CodeSignerDefaults = @{
     Default: $false (normal code signing). Set $true if you need /kernelDriverSigning by default.
 #>
 function Set-CodeSignerDefaults {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string] $DigiCertUtilityExe,
         [bool] $KernelDriverSigning = $false
@@ -67,6 +68,8 @@ function Set-CodeSignerDefaults {
     PSCustomObject with DigiCertUtilityExe and KernelDriverSigning.
 #>
 function Get-CodeSignerDefaults {
+    [CmdletBinding()]
+    param()
     [pscustomobject]@{
         DigiCertUtilityExe  = $script:CodeSignerDefaults.DigiCertUtilityExe
         KernelDriverSigning = $script:CodeSignerDefaults.KernelDriverSigning
@@ -97,6 +100,7 @@ function Get-CodeSignerDefaults {
     PSCustomObject with ExitCode, Succeeded, StdOut, StdErr, ErrorText.
 #>
 function Invoke-CodeSigner {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string]   $DigiCertUtilityExe,
         [Parameter(Mandatory=$true)][string[]] $Files,
@@ -153,7 +157,8 @@ function Invoke-CodeSigner {
 .OUTPUTS
     PSCustomObject with Total, Signed, Failed.
 #>
-function Sign-Files {
+function Set-CodeSignature {
+    [CmdletBinding()]
     param(
         [string]   $DigiCertUtilityExe,
         [Parameter(Mandatory=$true)][string[]] $Files,
@@ -237,14 +242,17 @@ function Sign-Files {
 
 <#
 .SYNOPSIS
-    Simple global entry point to sign one or many executables via DigiCert.
+    Simple global entry point to sign executables and DLLs via DigiCert.
 
 .DESCRIPTION
-    Uses session defaults if DigiCertUtilityExe is not passed explicitly.
-    Batch-signs and falls back to per-file to isolate failures. Optionally verifies Authenticode.
+    - Accepts files and/or directories.
+    - When a directory is provided, discovers *.exe and (by default) *.dll under it (recursively).
+    - Uses session defaults if DigiCertUtilityExe is not passed explicitly.
+    - Batch-signs and falls back to per-file to isolate failures.
+    - Optionally verifies Authenticode.
 
 .PARAMETER Path
-    One or more executable file paths to sign.
+    One or more file or directory paths to sign. Directories are expanded to *.exe and (optionally) *.dll.
 
 .PARAMETER DigiCertUtilityExe
     Full path to DigiCertUtil.exe. If omitted, uses Set-CodeSignerDefaults value.
@@ -252,17 +260,23 @@ function Sign-Files {
 .PARAMETER KernelDriverSigning
     Overrides default. If omitted, uses Set-CodeSignerDefaults value.
 
+.PARAMETER IncludeDlls
+    When expanding directories or filtering passed file paths, include *.dll alongside *.exe.
+    Default: $true.
+
 .PARAMETER Verify
     Verify Authenticode signature after signing.
 
 .PARAMETER Quiet
     Suppress signer output (still reports summary).
 #>
-function Sign-ExeViaDigiCert {
+function Invoke-DigiCertSigning {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string[]] $Path,
         [string] $DigiCertUtilityExe,
         [AllowNull()][object] $KernelDriverSigning = $null,
+        [bool] $IncludeDlls = $true,
         [switch] $Verify,
         [switch] $Quiet
     )
@@ -282,29 +296,50 @@ function Sign-ExeViaDigiCert {
             $kds = [bool]$KernelDriverSigning
         }
 
-        $files = @($buffer)
+        # Expand directories and filter to .exe/.dll as applicable
+        $resolved = New-Object System.Collections.Generic.List[string]
+        foreach ($item in @($buffer)) {
+            if (-not $item) { continue }
+
+            if (Test-Path -LiteralPath $item -PathType Container) {
+                $resolved.AddRange( (Get-ExecutableTargets -Root $item -IncludeDlls:$IncludeDlls -Recurse:$true) )
+                continue
+            }
+
+            if (Test-Path -LiteralPath $item -PathType Leaf) {
+                $ext = [System.IO.Path]::GetExtension($item)
+                $isExe = $ext -and $ext.Equals('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+                $isDll = $ext -and $ext.Equals('.dll', [System.StringComparison]::OrdinalIgnoreCase)
+                if ($isExe -or ($IncludeDlls -and $isDll)) {
+                    $resolved.Add((Resolve-Path -LiteralPath $item).Path)
+                }
+            }
+        }
+
+        $files = @($resolved | Select-Object -Unique)
         if ($files.Count -eq 0) {
             Write-Host 'No files to sign.' -ForegroundColor Yellow
             return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
         }
 
-        Sign-Files -DigiCertUtilityExe $exe -Files $files -KernelDriverSigning:$kds -Verify:$Verify -Quiet:$Quiet
+        Set-CodeSignature -DigiCertUtilityExe $exe -Files $files -KernelDriverSigning:$kds -Verify:$Verify -Quiet:$Quiet
     }
 }
 
 <#
 .SYNOPSIS
-    Discovers signable files (*.exe and optionally *.dll) under a directory.
+    Discovers signable files (*.exe and, by default, *.dll) under a directory.
 
 .PARAMETER IncludeDlls
-    Also collect *.dll files alongside *.exe. DigiCert can sign both.
+    Also collect *.dll files alongside *.exe. Default: $true (DigiCert can sign both).
 #>
 function Get-ExecutableTargets {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string] $Root,
         [string[]] $IncludeNames,
         [bool]   $Recurse    = $true,
-        [switch] $IncludeDlls
+        [bool]   $IncludeDlls = $true
     )
 
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
@@ -327,15 +362,28 @@ function Get-ExecutableTargets {
 
 <#
 .SYNOPSIS
-    Signs executables under .venv\Scripts (optionally a subset by name).
+    Signs executables and (optionally) DLLs under .venv\Scripts (optionally a subset by name).
 
 .PARAMETER DigiCertUtilityExe
     Optional. Falls back to the value from Set-CodeSignerDefaults.
 
 .PARAMETER KernelDriverSigning
     Default: $false. Only set when signing actual kernel drivers.
+
+.PARAMETER IncludeNames
+    Optional list of specific file names to include (case-insensitive). Applies to both EXEs and DLLs.
+
+.PARAMETER PoetryOnly
+    Shortcut to only sign poetry.exe.
+
+.PARAMETER Verify
+    If set, validates signatures with Get-AuthenticodeSignature and treats non-Valid as failure.
+
+.PARAMETER IncludeDlls
+    Include *.dll alongside *.exe when discovering files in the Scripts folder (default: $true).
 #>
-function Sign-VenvScripts {
+function Set-VenvScriptSignature {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string] $VenvDir,
         [string] $DigiCertUtilityExe,
@@ -343,7 +391,8 @@ function Sign-VenvScripts {
         [string[]] $IncludeNames,
         [switch] $PoetryOnly,
         [switch] $Verify,
-        [switch] $Quiet
+        [switch] $Quiet,
+        [bool] $IncludeDlls = $true
     )
 
     if (-not $DigiCertUtilityExe) { $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe }
@@ -365,10 +414,11 @@ function Sign-VenvScripts {
     $names = $IncludeNames
     if ($PoetryOnly) { $names = @('poetry.exe') }
 
-    $targets = Get-ExecutableTargets -Root $scriptsDir -IncludeNames $names -Recurse:$true
+    $targets = Get-ExecutableTargets -Root $scriptsDir -IncludeNames $names -Recurse:$true -IncludeDlls:$IncludeDlls
     $targets = @($targets)
     if ($targets.Count -eq 0) {
-        Write-Host ("No {0} found under: {1}" -f ($(if ($names) { ($names -join ',') } else { '*.exe' }), $scriptsDir) ) -ForegroundColor Yellow
+        $pattern = if ($names) { ($names -join ',') } else { if ($IncludeDlls) { '*.exe,*.dll' } else { '*.exe' } }
+        Write-Host ("No {0} found under: {1}" -f $pattern, $scriptsDir) -ForegroundColor Yellow
         return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
     }
 
@@ -378,7 +428,7 @@ function Sign-VenvScripts {
         Write-Host "Signing mode: Normal code signing" -ForegroundColor Yellow
     }
 
-    Sign-Files -DigiCertUtilityExe $DigiCertUtilityExe -Files $targets -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
+    Set-CodeSignature -DigiCertUtilityExe $DigiCertUtilityExe -Files $targets -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
 }
 
 <#
@@ -387,9 +437,7 @@ function Sign-VenvScripts {
 
 .DESCRIPTION
     Requires the caller to pass an explicit -ShimPath. This keeps CodeSigning
-    ignorant of Poetry's layout (which differs between Poetry 1.2+ and
-    legacy installs); the orchestrator should resolve the shim via
-    Get-PoetryShimPath from Poetry.psm1 and pass the result here.
+    ignorant of Poetry's layout; the orchestrator should resolve the shim and pass the result here.
 
 .PARAMETER ShimPath
     Absolute path to poetry.exe. If missing or the file does not exist,
@@ -401,7 +449,8 @@ function Sign-VenvScripts {
 .PARAMETER KernelDriverSigning
     Default: $false. Kernel driver signing is wrong for a Python CLI shim.
 #>
-function Sign-PoetryShim {
+function Set-PoetryShimSignature {
+    [CmdletBinding()]
     param(
         [string] $ShimPath,
         [string] $DigiCertUtilityExe,
@@ -411,7 +460,7 @@ function Sign-PoetryShim {
     )
 
     if (-not $ShimPath) {
-        Write-Banner 'Sign-PoetryShim called without -ShimPath; nothing to sign.' 'WARN'
+        Write-Banner 'Set-PoetryShimSignature called without -ShimPath; nothing to sign.' 'WARN'
         return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
     }
 
@@ -422,15 +471,28 @@ function Sign-PoetryShim {
 
     if (-not $DigiCertUtilityExe) { $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe }
 
-    Sign-ExeViaDigiCert -Path $ShimPath -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
+    Invoke-DigiCertSigning -Path $ShimPath -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
 }
+
+# -----------------------------------------------------------------------------
+# Backward-compatible aliases for old (unapproved-verb) names
+# -----------------------------------------------------------------------------
+Set-Alias -Name 'Sign-Files'         -Value 'Set-CodeSignature'
+Set-Alias -Name 'Sign-ExeViaDigiCert' -Value 'Invoke-DigiCertSigning'
+Set-Alias -Name 'Sign-VenvScripts'    -Value 'Set-VenvScriptSignature'
+Set-Alias -Name 'Sign-PoetryShim'     -Value 'Set-PoetryShimSignature'
 
 Export-ModuleMember -Function `
     Set-CodeSignerDefaults, `
     Get-CodeSignerDefaults, `
     Invoke-CodeSigner, `
-    Sign-Files, `
-    Sign-ExeViaDigiCert, `
+    Set-CodeSignature, `
+    Invoke-DigiCertSigning, `
     Get-ExecutableTargets, `
-    Sign-VenvScripts, `
-    Sign-PoetryShim
+    Set-VenvScriptSignature, `
+    Set-PoetryShimSignature `
+    -Alias `
+    'Sign-Files', `
+    'Sign-ExeViaDigiCert', `
+    'Sign-VenvScripts', `
+    'Sign-PoetryShim'
