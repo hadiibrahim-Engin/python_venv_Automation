@@ -113,7 +113,7 @@ function Invoke-PmDetection {
 .DESCRIPTION
     This is the single call the orchestrator (Setup-Core.psm1) makes inside
     the DETECT pipeline step. It:
-      1. Applies non-PM config-file preferences (PinnedVersions, IncludeDev).
+      1. Applies non-PM config-file preferences (PinnedVersions).
       2. Calls Resolve-PackageManager to determine the winning PM.
       3. Writes the result back into $Ctx.
       4. Emits structured log lines via Write-LogDetail so the operator can
@@ -130,7 +130,7 @@ function Invoke-PmDetection {
 #>
     param([Parameter(Mandatory=$true)][hashtable] $Ctx)
 
-    # Apply non-PM config-file preferences (PinnedVersions, IncludeDev).
+    # Apply non-PM config-file preferences (PinnedVersions).
     Merge-SetupConfig -ProjectRoot $Ctx.ProjectRoot -Ctx $Ctx
 
     # Resolve PM using the full priority chain.

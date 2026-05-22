@@ -16,8 +16,8 @@ $ErrorActionPreference = 'Stop'
     Invoke-Prechecks and decides whether to continue or abort based on the
     returned ContinueSetup flag.
 
-    Non-critical failures (e.g. DigiCert missing) cause setup to auto-disable
-    the affected feature rather than aborting outright.
+    Critical failures, including missing DigiCert, stop
+    setup before any mutation. Non-critical diagnostics warn and continue.
 #>
 
 
@@ -47,7 +47,7 @@ function Test-NetworkAccess {
         [hashtable[]] $Endpoints = @(
             @{ Host = 'pypi.org';             Port = 443 },
             @{ Host = 'files.pythonhosted.org'; Port = 443 },
-            @{ Host = 'astral.sh';            Port = 443 }   # uv installer
+            @{ Host = 'www.python.org';       Port = 443 }
         ),
         [int] $TimeoutMs = 3000
     )
@@ -105,29 +105,40 @@ function Test-DigiCertAvailable {
     Verifies that the DigiCert utility executable exists at the expected path.
 
 .OUTPUTS
-    PSCustomObject { Check; Passed; Message; Fix; AutoFix }
-    AutoFix is a scriptblock that callers may invoke to disable the feature
-    gracefully instead of aborting.
+    PSCustomObject { Check; Passed; Critical; Message; Fix; AutoFix }
+    DigiCert is required infrastructure, so missing DigiCert is always critical.
 #>
     param([Parameter(Mandatory=$true)][string] $DigiCertExe)
 
+    if ($env:OS -ne 'Windows_NT') {
+        return [pscustomobject]@{
+            Check    = 'DigiCert'
+            Passed   = $false
+            Critical = $true
+            Message  = 'DigiCert signing is required, but this automation can only run DigiCertUtil.exe on Windows.'
+            Fix      = 'Run setup on Windows with DigiCert Utility installed, or pass -DigiCertUtilityExe with the correct path.'
+            AutoFix  = $null
+        }
+    }
+
     if (Test-Path -LiteralPath $DigiCertExe -PathType Leaf) {
         return [pscustomobject]@{
-            Check   = 'DigiCert'
-            Passed  = $true
-            Message = "DigiCert utility found: $DigiCertExe"
-            Fix     = $null
-            AutoFix = $null
+            Check    = 'DigiCert'
+            Passed   = $true
+            Critical = $true
+            Message  = "DigiCert utility found: $DigiCertExe"
+            Fix      = $null
+            AutoFix  = $null
         }
     }
 
     return [pscustomobject]@{
-        Check   = 'DigiCert'
-        Passed  = $false
-        Critical = $false      # non-critical: setup can continue with signing disabled
-        Message = "DigiCert utility NOT found at: $DigiCertExe"
-        Fix     = "Install DigiCert Utility OR re-run setup with -EnableCodeSigning:`$false to skip signing."
-        AutoFix = { param($ctx) $ctx.EnableCodeSigning = $false }
+        Check    = 'DigiCert'
+        Passed   = $false
+        Critical = $true
+        Message  = "DigiCert utility NOT found at: $DigiCertExe"
+        Fix      = "Install DigiCert Utility at the configured path, or pass -DigiCertUtilityExe with the correct path."
+        AutoFix  = $null
     }
 }
 
@@ -142,12 +153,13 @@ function Invoke-Prechecks {
     Runs all pre-setup checks and returns a consolidated result.
 
 .DESCRIPTION
-    Checks are evaluated in order.  Non-critical failures apply their AutoFix
-    (e.g. disabling code signing) and continue.  Critical failures require
-    explicit user confirmation (semi-auto) or cause an abort (autonomous).
+    Checks are evaluated in order. Non-critical failures apply their AutoFix
+    (e.g. disabling network-dependent paths) and continue. Critical failures
+    abort a real setup run before any mutation.
 
 .PARAMETER EnableCodeSigning
-    When true, the DigiCert availability check is included.
+    Retained for caller compatibility. DigiCert availability is always checked
+    because this setup requires DigiCert infrastructure.
 
 .PARAMETER DigiCertExe
     Full path to DigiCertUtil.exe.
@@ -155,11 +167,12 @@ function Invoke-Prechecks {
 .PARAMETER NonInteractive
     When true (autonomous mode): non-critical failures apply AutoFix and
     continue; critical failures throw immediately.
-    When false (semi-auto mode): the user is prompted on any failure.
+    When false (semi-auto mode): critical failures still abort; the user gets
+    the same actionable diagnostics before setup stops.
 
 .PARAMETER Ctx
     Reference to the setup context hashtable.  AutoFix scriptblocks receive
-    this to disable features (e.g. ctx.EnableCodeSigning = $false).
+    this to mark degraded non-critical capabilities.
 
 .OUTPUTS
     PSCustomObject { AllPassed; ContinueSetup; Results }
@@ -169,9 +182,11 @@ function Invoke-Prechecks {
         [string]   $DigiCertExe        = 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe',
         [bool]     $NonInteractive     = $false,
         [hashtable]$Ctx                = @{},
-        # When $true (default), setup stops even on non-critical auto-fixed failures.
-        # Pass $false to continue past non-critical failures (legacy behaviour).
-        [bool]     $StopOnNonCritical  = $true
+        # Optional strict mode for diagnostics such as network reachability.
+        # Critical checks, including DigiCert, always stop.
+        [bool]     $StopOnNonCritical  = $false,
+        # Dry-run/report mode prints failures without prompting or throwing.
+        [bool]     $ReportOnly         = $false
     )
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -180,9 +195,9 @@ function Invoke-Prechecks {
     # Network: always run so the user gets an early, clear failure if offline.
     $results.Add((Test-NetworkAccess))
 
-    if ($EnableCodeSigning) {
-        $results.Add((Test-DigiCertAvailable -DigiCertExe $DigiCertExe))
-    }
+    # DigiCert is required infrastructure for this automation, independent of
+    # whether the later signing step is enabled for a specific run.
+    $results.Add((Test-DigiCertAvailable -DigiCertExe $DigiCertExe))
 
     # --- Evaluate results ---
     $failed        = @($results | Where-Object { -not $_.Passed })
@@ -214,19 +229,20 @@ function Invoke-Prechecks {
         foreach ($r in $nonCritical) {
             if ($r.AutoFix) {
                 & $r.AutoFix $Ctx
-                Write-Host ("  [AUTO-FIX] '{0}' feature auto-disabled." -f $r.Check) -ForegroundColor DarkYellow
+                Write-Host ("  [AUTO-FIX] Applied context adjustment for '{0}'." -f $r.Check) -ForegroundColor DarkYellow
             }
         }
 
         if ($critical.Count -gt 0) {
-            # Critical failures - must abort or get explicit user confirmation
-            if ($NonInteractive) {
-                throw ("Setup aborted: {0} critical precheck(s) failed." -f $critical.Count)
-            }
-            $answer = (Read-Host '  Critical checks failed. Continue anyway? (yes / no)').Trim()
-            $continueSetup = ($answer -ieq 'yes' -or $answer -ieq 'y')
-            if (-not $continueSetup) {
-                Write-Host '  Setup aborted by user.' -ForegroundColor Red
+            # Critical failures always stop a real setup run. In report-only
+            # mode, we return the failure so dry-run can show the remaining plan.
+            $continueSetup = $false
+            if ($ReportOnly) {
+                Write-Host '  Report only: real setup would abort here.' -ForegroundColor Yellow
+            } elseif ($NonInteractive) {
+                Write-Host ("  Setup will abort: {0} critical precheck(s) failed." -f $critical.Count) -ForegroundColor Red
+            } else {
+                Write-Host '  Setup will abort. Resolve the critical precheck failure and re-run setup.' -ForegroundColor Red
             }
         } else {
             # Only non-critical failures - auto-fixed above

@@ -28,10 +28,11 @@ if (-not $dotSourced) {
     return
 }
 
-$projectDir = $PSScriptRoot
+$scriptDir = $PSScriptRoot
+$projectDir = Split-Path $scriptDir -Parent
 $venvCandidates = @(
     (Join-Path $projectDir '.venv'),
-    (Join-Path (Split-Path $projectDir -Parent) '.venv')
+    (Join-Path $scriptDir '.venv')
 )
 
 $venvPath = $null

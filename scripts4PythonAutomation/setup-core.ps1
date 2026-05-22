@@ -7,17 +7,19 @@
 # Entry point for the Python environment setup pipeline.
 # Run directly from a PowerShell console (pwsh or powershell.exe):
 #
-#   .\scripts\setup-core.ps1                              # auto-detects uv or poetry
-#   .\scripts\setup-core.ps1 -PackageManager uv            # force UV
-#   .\scripts\setup-core.ps1 -PackageManager poetry        # force Poetry
-#   .\scripts\setup-core.ps1 -UpdateDependencies           # re-resolve + upgrade all deps
-#   .\scripts\setup-core.ps1 -ExcludeDev                   # production deps only
-#   .\scripts\setup-core.ps1 -DryRun                       # preview pipeline, no changes
-#   .\scripts\setup-core.ps1 -ListMode                     # pick Python interactively
-#   .\scripts\setup-core.ps1 -PythonExePath "C:\Python311\python.exe"
+#   .\scripts4PythonAutomation\setup-core.ps1                              # auto-detects uv or poetry
+#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv            # force UV
+#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager poetry        # force Poetry
+#   .\scripts4PythonAutomation\setup-core.ps1 -UpdateDependencies           # re-resolve + upgrade all deps
+#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev                   # production deps only
+#   .\scripts4PythonAutomation\setup-core.ps1 -DryRun                       # preview pipeline, no changes
+#   .\scripts4PythonAutomation\setup-core.ps1 -ListMode                     # pick Python interactively
+#   .\scripts4PythonAutomation\setup-core.ps1 -PythonExePath "C:\Python311\python.exe"
+#   .\scripts4PythonAutomation\setup-core.ps1 -ForceRecreateVenv            # rebuild .venv
+#   .\scripts4PythonAutomation\setup-core.ps1 -NonInteractive               # CI-safe, no prompts
 #
-# If PowerShell blocks execution due to ExecutionPolicy, run once with:
-#   powershell.exe -ExecutionPolicy Bypass -File .\scripts\setup-core.ps1
+# If PowerShell blocks execution because files came from a browser or zip,
+# run once with -UnblockScripts after reviewing the project contents.
 # =============================================================================
 
 param(
@@ -40,13 +42,48 @@ param(
     [ValidateSet('uv','poetry','auto')]
     [string] $PackageManager = 'auto',
 
-    # By default setup stops when any precheck fails (even auto-fixed non-critical ones).
-    # Pass this switch to allow setup to continue past precheck failures.
+    # Critical prechecks always stop setup. This switch keeps compatibility with
+    # older command lines; non-critical diagnostics already continue by default.
     [Parameter()]
     [switch] $ContinueOnPrecheckFailure,
 
     [Parameter()]
-    [switch] $RecreateVenv
+    [Alias('RecreateVenv')]
+    [switch] $ForceRecreateVenv,
+
+    [Parameter()]
+    [switch] $NonInteractive,
+
+    [Parameter()]
+    [bool] $EnableCodeSigning = $true,
+
+    [Parameter()]
+    [string] $DigiCertUtilityExe = $(if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe' }),
+
+    [Parameter()]
+    [switch] $KernelDriverSigning,
+
+    [Parameter()]
+    [switch] $SignPoetryOnly,
+
+    [Parameter()]
+    [bool] $RequirePmShimSigning = $true,
+
+    [Parameter()]
+    [string] $PinnedPoetryVersion = '',
+
+    [Parameter()]
+    [string] $PinnedUvVersion = '',
+
+    # Automatic Python installation downloads and runs a python.org installer.
+    # Keep this opt-in so setup never installs an interpreter by surprise.
+    [Parameter()]
+    [switch] $AllowPythonInstall,
+
+    # Only use this when files were downloaded from a browser/zip and PowerShell
+    # refuses to load them because of Zone.Identifier metadata.
+    [Parameter()]
+    [switch] $UnblockScripts
 )
 
 Set-StrictMode -Version Latest
@@ -56,6 +93,7 @@ $ErrorActionPreference = 'Stop'
 # Here we only capture explicit CLI overrides so they can be forwarded to the subprocess.
 $resolvedPythonExePath = if ($PSBoundParameters.ContainsKey('PythonExePath')) { $PythonExePath } else { $null }
 $resolvedListMode      = [bool]$ListMode
+$resolvedNonInteractive = [bool]$NonInteractive -or [bool]$DryRun -or ($env:CI -match '^(1|true|yes)$')
 
 # VS Code isolation
 # VS Code's PowerShell extension opens every file passed to Import-Module in the
@@ -69,7 +107,7 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     } else {
         "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     }
-    $forwardArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path)
+    $forwardArgs = @('-NoProfile', '-File', $MyInvocation.MyCommand.Path)
     if ($resolvedPythonExePath) {
         $forwardArgs += @('-PythonExePath', $resolvedPythonExePath)
     }
@@ -93,19 +131,52 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     if ($ContinueOnPrecheckFailure) {
         $forwardArgs += @('-ContinueOnPrecheckFailure')
     }
+    if ($ForceRecreateVenv) {
+        $forwardArgs += @('-ForceRecreateVenv')
+    }
+    if ($resolvedNonInteractive) {
+        $forwardArgs += @('-NonInteractive')
+    }
+    if ($PSBoundParameters.ContainsKey('EnableCodeSigning')) {
+        $forwardArgs += @('-EnableCodeSigning', $EnableCodeSigning)
+    }
+    if ($PSBoundParameters.ContainsKey('DigiCertUtilityExe')) {
+        $forwardArgs += @('-DigiCertUtilityExe', $DigiCertUtilityExe)
+    }
+    if ($KernelDriverSigning) {
+        $forwardArgs += @('-KernelDriverSigning')
+    }
+    if ($SignPoetryOnly) {
+        $forwardArgs += @('-SignPoetryOnly')
+    }
+    if ($PSBoundParameters.ContainsKey('RequirePmShimSigning')) {
+        $forwardArgs += @('-RequirePmShimSigning', $RequirePmShimSigning)
+    }
+    if ($PinnedPoetryVersion) {
+        $forwardArgs += @('-PinnedPoetryVersion', $PinnedPoetryVersion)
+    }
+    if ($PinnedUvVersion) {
+        $forwardArgs += @('-PinnedUvVersion', $PinnedUvVersion)
+    }
+    if ($AllowPythonInstall) {
+        $forwardArgs += @('-AllowPythonInstall')
+    }
+    if ($UnblockScripts) {
+        $forwardArgs += @('-UnblockScripts')
+    }
     & "$ps" @forwardArgs
     $childExitCode = $LASTEXITCODE
 
     # Activation done inside the detached child process does not persist back
     # to this original shell. Re-apply activation here on success.
-    if ($childExitCode -eq 0) {
+    if ($childExitCode -eq 0 -and -not $DryRun) {
         $activateScript = Join-Path $PSScriptRoot 'activate-venv.ps1'
         if (Test-Path $activateScript -PathType Leaf) {
             try {
                 . $activateScript
             } catch {
                 Write-Host ("[WARN] [POST] [Activation] Could not activate .venv in parent shell: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-                Write-Host "Run manually: . .\scripts\activate-venv.ps1" -ForegroundColor Yellow
+                Write-Host "Run manually: . .\scripts4PythonAutomation\activate-venv.ps1" -ForegroundColor Yellow
             }
         }
     }
@@ -114,13 +185,17 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     exit $childExitCode
 }
 
-# Unblock all module files in this directory tree.
-# Files extracted from a zip or cloned via browser download carry a Zone.Identifier
-# NTFS stream that causes PowerShell to refuse loading them under RemoteSigned / AllSigned policy.
-Get-ChildItem -Path $PSScriptRoot -Recurse -Include '*.ps1','*.psm1','*.psd1' -ErrorAction SilentlyContinue |
-    ForEach-Object { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
+if ($UnblockScripts) {
+    # Files extracted from a zip or browser download can carry a Zone.Identifier
+    # NTFS stream. Unblocking is explicit so setup does not silently lower policy.
+    $scriptFiles = @(Get-ChildItem -Path $PSScriptRoot -Recurse -Include '*.ps1','*.psm1','*.psd1' -ErrorAction SilentlyContinue)
+    foreach ($file in $scriptFiles) {
+        Write-Host ("Unblocking script file: {0}" -f $file.FullName) -ForegroundColor DarkYellow
+        Unblock-File -LiteralPath $file.FullName -ErrorAction SilentlyContinue
+    }
+}
 
-# Compute project root (scripts\ is the module location; project root is its parent)
+# Compute project root (scripts4PythonAutomation\ is the module location; project root is its parent)
 $ProjectRoot = (Split-Path $PSScriptRoot -Parent)
 
 # Import the root module
@@ -136,13 +211,21 @@ Import-Module $rootModule -Force
 try {
     $setupParams = @{
         ProjectRoot        = $ProjectRoot
-        ForceRecreateVenv  = [bool]$RecreateVenv
+        ForceRecreateVenv  = [bool]$ForceRecreateVenv
         SkipPoetryInstall  = $false
-        NonInteractive     = $false
+        NonInteractive     = $resolvedNonInteractive
+        EnableCodeSigning  = $EnableCodeSigning
+        DigiCertUtilityExe = $DigiCertUtilityExe
+        KernelDriverSigning = [bool]$KernelDriverSigning
+        SignPoetryOnly     = [bool]$SignPoetryOnly
+        RequirePmShimSigning = $RequirePmShimSigning
         UpdateDependencies = [bool]$UpdateDependencies
         IncludeDev         = (-not [bool]$ExcludeDev)
         ListMode           = $resolvedListMode
         PackageManager     = $PackageManager
+        PinnedPoetryVersion = $PinnedPoetryVersion
+        PinnedUvVersion    = $PinnedUvVersion
+        AllowPythonInstall = [bool]$AllowPythonInstall
     }
     if ($DryRun)                     { $setupParams.DryRun = $true }
     if ($resolvedPythonExePath)      { $setupParams.PythonExePath = $resolvedPythonExePath }

@@ -7,6 +7,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$import = 'Microsoft.PowerShell.Core\Import-Module'
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Compat.psm1') -Force -DisableNameChecking -ErrorAction Stop
+
 <#
 .SYNOPSIS
     VS Code workspace configuration helpers.
@@ -32,7 +35,7 @@ function Write-VSCodeInterpreterSetting {
         New-Item -ItemType Directory -Path $vscodeDir | Out-Null
     }
     # Normalize first, then convert to forward slashes for VS Code JSON storage
-    $venvPython = ([System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\python.exe'))) -replace '\\', '/'
+    $venvPython = ([System.IO.Path]::GetFullPath((Get-VenvPythonExe -VenvDir $VenvDir))) -replace '\\', '/'
 
     # Read existing settings and merge so we do not destroy other keys.
     $settings = [ordered]@{}

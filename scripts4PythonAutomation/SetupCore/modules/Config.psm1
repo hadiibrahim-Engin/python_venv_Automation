@@ -26,7 +26,6 @@ $ErrorActionPreference = 'Stop'
       "PackageManager"      : "auto" | "uv" | "poetry",
       "PinnedPoetryVersion" : null   | "1.8.3",
       "PinnedUvVersion"     : null   | "0.6.14",
-      "IncludeDev"          : true   | false,
       "_comment"            : "..."
     }
 #>
@@ -132,8 +131,9 @@ function Merge-SetupConfig {
     Applies non-PM config-file preferences to a setup context hashtable.
 
 .DESCRIPTION
-    Reads .setup-config.json and fills in PinnedVersions and IncludeDev that
-    were not explicitly supplied via CLI.
+    Reads .setup-config.json and fills in pinned tool versions that were not
+    explicitly supplied via CLI. Dependency scope is intentionally CLI-only so
+    one production-only run cannot surprise later developer setups.
 
     PackageManager is intentionally NOT handled here — PM resolution is the
     sole responsibility of Resolve-PackageManager (PackageManager.psm1), which
@@ -160,14 +160,6 @@ function Merge-SetupConfig {
             $Ctx[$key] = $config.$key
             $applied.Add(("{0}={1}" -f $key, $config.$key))
         }
-    }
-
-    # IncludeDev: only override when the caller left it at the default ($true)
-    if ($config.PSObject.Properties.Name -contains 'IncludeDev' -and
-        $null -ne $config.IncludeDev -and
-        $Ctx.IncludeDev -eq $true) {
-        $Ctx.IncludeDev = [bool]$config.IncludeDev
-        $applied.Add(("include_dev={0}" -f $config.IncludeDev))
     }
 
     if ($applied.Count -gt 0) {

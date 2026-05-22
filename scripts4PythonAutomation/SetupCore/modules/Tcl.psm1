@@ -35,12 +35,20 @@ function Copy-TclToVenv {
         Write-Host ''
         Write-Host 'Copying tcl folder to .venv ...' -ForegroundColor Yellow
 
-        # robocopy exit codes < 8 are non-fatal
-        robocopy $tclSrc $tclDst /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
-        if ($LASTEXITCODE -lt 8) {
-            Write-Banner 'tcl folder copied to .venv.' 'SUCCESS'
+        if ($env:OS -eq 'Windows_NT') {
+            # robocopy exit codes < 8 are non-fatal
+            robocopy $tclSrc $tclDst /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+            if ($LASTEXITCODE -lt 8) {
+                Write-Banner 'tcl folder copied to .venv.' 'SUCCESS'
+            } else {
+                throw ("robocopy failed (exit {0}) while copying tcl folder." -f $LASTEXITCODE)
+            }
         } else {
-            throw ("robocopy failed (exit {0}) while copying tcl folder." -f $LASTEXITCODE)
+            if (Test-Path -LiteralPath $tclDst) {
+                Remove-Item -LiteralPath $tclDst -Recurse -Force -ErrorAction Stop
+            }
+            Copy-Item -LiteralPath $tclSrc -Destination $tclDst -Recurse -Force -ErrorAction Stop
+            Write-Banner 'tcl folder copied to .venv.' 'SUCCESS'
         }
     } else {
         Write-Banner ("tcl folder not found at '{0}' -- skipping." -f $tclSrc) 'WARN'

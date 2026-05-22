@@ -84,8 +84,11 @@ function Find-AllPythonInterpreters {
     $pyCmd = Get-Command 'py' -ErrorAction SilentlyContinue
     if ($pyCmd) {
         $pyExe = $pyCmd.Source
-    } elseif (Test-Path (Join-Path $env:SystemRoot 'py.exe') -PathType Leaf) {
-        $pyExe = Join-Path $env:SystemRoot 'py.exe'
+    } elseif ($env:SystemRoot) {
+        $systemPy = Join-Path $env:SystemRoot 'py.exe'
+        if (Test-Path $systemPy -PathType Leaf) {
+            $pyExe = $systemPy
+        }
     }
 
     if ($pyExe) {
@@ -103,11 +106,10 @@ function Find-AllPythonInterpreters {
     }
 
     # 3. Standard python.org installer locations (brief scan, not exhaustive)
-    $candidateRoots = @(
-        (Join-Path $env:LOCALAPPDATA 'Programs\Python'),
-        $env:ProgramFiles,
-        "${env:ProgramFiles(x86)}"
-    )
+    $candidateRoots = @()
+    if ($env:LOCALAPPDATA) { $candidateRoots += (Join-Path $env:LOCALAPPDATA 'Programs\Python') }
+    if ($env:ProgramFiles) { $candidateRoots += $env:ProgramFiles }
+    if (${env:ProgramFiles(x86)}) { $candidateRoots += "${env:ProgramFiles(x86)}" }
     foreach ($root in $candidateRoots) {
         if (-not $root -or -not (Test-Path $root -PathType Container)) { continue }
         foreach ($dir in (Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
@@ -841,6 +843,10 @@ function Install-PythonViaPythonOrg {
         [Parameter(Mandatory=$true)][int] $Minor
     )
 
+    if ($env:OS -ne 'Windows_NT') {
+        throw 'Automatic Python installation is only supported on Windows because it runs the python.org Windows installer. Install Python manually or pass -PythonExePath.'
+    }
+
     $resolvedInstaller = Resolve-PythonInstallerDownload -Major $Major -Minor $Minor
     $version = $resolvedInstaller.Version
     $installerName = $resolvedInstaller.InstallerName
@@ -900,6 +906,21 @@ function Install-PythonViaPythonOrg {
         ) -join "`n"
         throw $errorMsg
     }
+
+    $fileHash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA256 -ErrorAction Stop
+    Write-Host ("  SHA256       : {0}" -f $fileHash.Hash) -ForegroundColor DarkGray
+
+    $authenticode = Get-Command 'Get-AuthenticodeSignature' -ErrorAction SilentlyContinue
+    if (-not $authenticode) {
+        throw 'Cannot verify Python installer signature: Get-AuthenticodeSignature is unavailable.'
+    }
+
+    $signature = Get-AuthenticodeSignature -FilePath $installerPath
+    $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '<none>' }
+    if ($signature.Status -ne 'Valid' -or $subject -notmatch 'Python Software Foundation') {
+        throw ("Refusing to run Python installer because signature validation failed. Status={0}; Subject={1}; File={2}" -f $signature.Status, $subject, $installerPath)
+    }
+    Write-Host ("  Signature    : Valid ({0})" -f $subject) -ForegroundColor Green
 
     try {
         Write-Host ''
@@ -1012,7 +1033,7 @@ function Install-RequiredPython {
             "If you have Python $requestedVersion installed elsewhere,",
             "you can provide the path directly to skip the download:",
             "",
-            "  .\scripts\setup-core.ps1 -PythonExePath 'C:\Path\To\python.exe'",
+            "  .\scripts4PythonAutomation\setup-core.ps1 -PythonExePath 'C:\Path\To\python.exe'",
             "",
             "Or re-run this script and enter the path when prompted.",
             ""
@@ -1256,7 +1277,7 @@ function Resolve-SelectedPython {
 
     if ($pythons.Count -eq 0) {
         if (-not $AllowInstall) {
-            throw ("No compatible Python interpreter found for constraint '{0}' and -AllowInstall is not set." -f $RequiresPythonRaw)
+            throw ("No compatible Python interpreter found for constraint '{0}'. Install Python manually, pass -PythonExePath, or re-run with -AllowPythonInstall to permit setup to download Python from python.org." -f $RequiresPythonRaw)
         }
 
         $installedExe = $null

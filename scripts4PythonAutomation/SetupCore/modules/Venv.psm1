@@ -17,8 +17,11 @@ $ErrorActionPreference = 'Stop'
 #>
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')         -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Filesystem.psm1') -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Filesystem.psm1')    -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Compat.psm1')        -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Versioning.psm1')    -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
 <#
 .SYNOPSIS
@@ -87,6 +90,63 @@ function Confirm-VenvExists {
     if ($missing.Count -gt 0) {
         throw ('.venv exists but is incomplete. Missing required file(s): {0}' -f ($missing -join ', '))
     }
+}
+
+<#
+.SYNOPSIS
+    Validates that an existing .venv uses a compatible Python interpreter.
+
+.DESCRIPTION
+    Reuse is only safe when the venv Python satisfies pyproject.toml and, for
+    explicit interpreter requests, matches the selected major/minor line.
+#>
+function Confirm-VenvPythonCompatible {
+    param(
+        [Parameter(Mandatory=$true)][string] $VenvDir,
+        [Parameter(Mandatory=$true)][System.Collections.Generic.List[hashtable]] $Constraints,
+        [Parameter(Mandatory=$true)][string] $RequiresPythonRaw,
+        [Parameter(Mandatory=$true)][object] $SelectedPython,
+        [bool] $RequireSelectedPython = $false
+    )
+
+    if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) { return }
+
+    $venvPython = Get-VenvPythonExe -VenvDir $VenvDir
+    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        throw (".venv exists but its Python executable is missing: {0}. Re-run with -ForceRecreateVenv." -f $venvPython)
+    }
+
+    $probeCode = "import sys; print('{}.{}.{}'.format(*sys.version_info[:3])); print(getattr(sys, '_base_executable', '') or sys.executable)"
+    $probe = Invoke-NativeCommand -Executable $venvPython -Arguments @('-c', $probeCode) -Quiet -NoLog
+    if (-not $probe.Succeeded) {
+        throw (".venv exists but its Python could not be started (exit {0}): {1}. Re-run with -ForceRecreateVenv." -f $probe.ExitCode, $venvPython)
+    }
+
+    $lines = @($probe.StdOut -split "`r?`n" | Where-Object { $_ })
+    if ($lines.Count -lt 1) {
+        throw (".venv Python did not report a version: {0}. Re-run with -ForceRecreateVenv." -f $venvPython)
+    }
+
+    $venvVersion = $null
+    try {
+        $venvVersion = [Version]($lines[0].Trim())
+    } catch {
+        throw (".venv Python reported an unparseable version '{0}'. Re-run with -ForceRecreateVenv." -f $lines[0])
+    }
+
+    if (-not (Test-VersionConstraints -Version $venvVersion -Constraints $Constraints)) {
+        throw (".venv uses Python {0}, which does not satisfy requires-python '{1}'. Re-run with -ForceRecreateVenv." -f $venvVersion, $RequiresPythonRaw)
+    }
+
+    if ($RequireSelectedPython -and $SelectedPython -and $SelectedPython.Version) {
+        $selectedVersion = [Version]$SelectedPython.Version
+        if ($venvVersion.Major -ne $selectedVersion.Major -or $venvVersion.Minor -ne $selectedVersion.Minor) {
+            throw (".venv uses Python {0}, but the requested interpreter is Python {1}. Re-run with -ForceRecreateVenv." -f $venvVersion, $selectedVersion)
+        }
+    }
+
+    $baseExe = if ($lines.Count -ge 2) { $lines[1].Trim() } else { $venvPython }
+    Write-Host ("  Existing .venv Python OK: {0} ({1})" -f $venvVersion, $baseExe) -ForegroundColor DarkGray
 }
 
 <#
@@ -227,6 +287,7 @@ function Remove-VenvBackup {
 Export-ModuleMember -Function `
     Remove-VenvIfExists, `
     Confirm-VenvExists, `
+    Confirm-VenvPythonCompatible, `
     Copy-PythonDllToVenv, `
     Write-ProjectPth, `
     Invoke-VenvActivation, `

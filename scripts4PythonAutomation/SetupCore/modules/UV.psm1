@@ -12,8 +12,8 @@ $ErrorActionPreference = 'Stop'
     uv package-manager bootstrap and command helpers.
 
 .DESCRIPTION
-    Handles uv availability checks, installation via the official astral.sh
-    installer, virtual-environment creation, and dependency sync.
+    Handles uv availability checks, pip-based installation through the selected
+    Python interpreter, virtual-environment creation, and dependency sync.
 
     uv is the default package manager.  Poetry remains available via the
     -PackageManager poetry CLI argument.
@@ -40,12 +40,12 @@ function Get-UvExe {
 <#
 .SYNOPSIS
     Returns the full path to the uv executable, or $null when not found.
-    Checks PATH first, then common pip/astral.sh install locations.
+    Checks PATH first, then common pip install locations.
 #>
     $cmd = Get-Command 'uv' -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
-    # Fallback: astral.sh default on Linux, and pip posix_user install on Linux
+    # Fallback: pip/uv default on Linux/macOS
     $posixFallback = Resolve-Path '~/.local/bin/uv' -ErrorAction SilentlyContinue
     if ($posixFallback -and (Test-Path -LiteralPath $posixFallback.Path -PathType Leaf)) {
         return $posixFallback.Path
@@ -88,13 +88,14 @@ function Get-UvVersion {
 function Initialize-UvRuntime {
 <#
 .SYNOPSIS
-    Ensures uv is available; installs it via the official installer if missing.
+    Ensures uv is available; installs it with the selected Python if missing.
 
 .DESCRIPTION
-    Uses a safe two-step install: download the installer script to a temp file,
-    then execute it in a separate PowerShell process.  This isolates the
-    installer from the current session and avoids Invoke-Expression on
-    downloaded content.
+    Uses pip through the already-selected project interpreter so tool bootstrap
+    does not accidentally depend on a different Python from PATH.
+
+.PARAMETER PythonExe
+    Selected project Python used to install uv if the executable is missing.
 
 .PARAMETER NonInteractive
     Throw on failure instead of prompting.
@@ -107,6 +108,7 @@ function Initialize-UvRuntime {
     PSCustomObject { Source; Version; Exe }
 #>
     param(
+        [Parameter(Mandatory=$true)][string] $PythonExe,
         [bool]   $NonInteractive = $false,
         [string] $PinnedVersion  = ''
     )
@@ -122,20 +124,15 @@ function Initialize-UvRuntime {
     $versionLabel = if ($PinnedVersion) { "v$PinnedVersion" } else { 'latest' }
     Write-Banner "uv not found. Installing ($versionLabel) via pip ..." 'WARN'
 
-    # Find any Python on PATH to run pip with.
-    $pythonExe = Get-CommandSource 'python'
-    if (-not $pythonExe) {
-        $pythonExe = Get-CommandSource 'python3'
-    }
-    if (-not $pythonExe) {
-        $msg = "uv is not installed and no Python interpreter was found on PATH to install it with.`nInstall Python first, then re-run setup."
+    if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
+        $msg = "uv is not installed and the selected Python interpreter cannot be used to install it: $PythonExe"
         if ($NonInteractive) { throw $msg }
         Exit-WithError -Message $msg
     }
 
     try {
         $result = Invoke-NativeCommand `
-            -Executable $pythonExe `
+            -Executable $PythonExe `
             -Arguments  @('-m', 'pip', 'install', '--quiet', $versionSpec) `
             -FailureMessage "pip install uv failed."
         if (-not $result.Succeeded) {
@@ -149,7 +146,7 @@ function Initialize-UvRuntime {
 
     # Refresh PATH so the newly installed uv executable is visible,
     # then re-run Get-UvExe which checks PATH + known fallback locations.
-    Add-PythonScriptsDirToPath -PythonExe $pythonExe
+    Add-PythonScriptsDirToPath -PythonExe $PythonExe
     $exe = Get-UvExe
 
     if (-not $exe) {

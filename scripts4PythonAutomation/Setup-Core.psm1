@@ -6,23 +6,12 @@
 
 .DESCRIPTION
     Loads all SetupCore helper modules and exposes Start-Setup, which performs
-    Python discovery/installation, Poetry runtime preparation, virtual
-    environment provisioning, project path wiring, and optional code signing.
+    Python discovery/installation, package-manager runtime preparation,
+    virtual environment provisioning, project path wiring, and DigiCert-backed
+    signing/validation.
 #>
 
 $ErrorActionPreference = 'Stop'
-
-# Prevent direct module import from the VS Code-integrated PowerShell host.
-# Importing this module there causes the extension to open every child .psm1 file.
-if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SUBPROCESS) {
-    $msg = @(
-        'Direct Import-Module of Setup-Core.psm1 from the VS Code terminal is blocked.',
-        'Run .\\setup-core.ps1 instead; it detaches to a plain PowerShell subprocess first.',
-        'This prevents SetupCore .psm1 modules from opening in the editor.'
-    ) -join ' '
-    Write-Host $msg -ForegroundColor Yellow
-    throw $msg
-}
 
 # Resolve to your actual modules folder
 $modulesDir = Join-Path (Join-Path $PSScriptRoot 'SetupCore') 'modules'
@@ -118,9 +107,10 @@ function Start-Setup {
 
 .DESCRIPTION
     Executes the setup pipeline in a fixed order:
-    parse pyproject metadata, resolve a compatible Python, ensure Poetry,
+    parse pyproject metadata, resolve a compatible Python, ensure the selected
+    package-manager runtime,
     recreate and validate .venv, install dependencies, write editor settings,
-    and optionally sign binaries.
+    and sign binaries through DigiCert.
 
 .PARAMETER ProjectRoot
     Project root directory containing pyproject.toml.
@@ -139,7 +129,8 @@ function Start-Setup {
     Disables pause prompts and uses exception flow for failures.
 
 .PARAMETER EnableCodeSigning
-    Enables optional DigiCert signing of executables in the venv.
+    Enables the DigiCert signing steps for generated executables. DigiCert
+    availability is still a required precheck for this automation.
 
 .PARAMETER DigiCertUtilityExe
     Full path to DigiCertUtil.exe.
@@ -191,6 +182,10 @@ function Start-Setup {
 .PARAMETER PinnedUvVersion
     When set, installs exactly this uv version (e.g. '0.6.14') instead of the
     latest release.  Has no effect when PackageManager is 'poetry'.
+
+.PARAMETER AllowPythonInstall
+    When true, setup may download and install Python from python.org if no
+    compatible interpreter is found locally. Defaults to false.
 
 .OUTPUTS
     PSCustomObject summarizing selected Python, Poetry runtime, and output paths.
@@ -250,9 +245,12 @@ function Start-Setup {
         [string] $PinnedUvVersion = '',
 
         [Parameter()]
-        # When $true (default), setup stops if any precheck fails (even auto-fixed non-critical ones).
-        # Pass $false (-ContinueOnPrecheckFailure) to allow setup to proceed despite failures.
-        [bool] $StopOnPrecheckFailure = $true
+        [bool] $AllowPythonInstall = $false,
+
+        [Parameter()]
+        # Critical prechecks always stop setup. Set true to also stop on
+        # non-critical diagnostics such as network reachability warnings.
+        [bool] $StopOnPrecheckFailure = $false
     )
 
     try {
@@ -303,12 +301,14 @@ function Start-Setup {
             PackageManager       = $PackageManager      # raw CLI arg ('auto'|'uv'|'poetry'); DETECT resolves
             PmSource             = $null                # 'cli' | 'config-file' | 'detected' | 'default'
             PmDetectionReport    = $null                # raw signals; populated when PmSource='detected'
-            EnableCodeSigning    = $EnableCodeSigning   # mutable — Prechecks may disable it
+            EnableCodeSigning    = $EnableCodeSigning   # validated by Prechecks
             NetworkAvailable     = $true                # mutable — Prechecks may set to $false
             IncludeDev           = $IncludeDev
             PinnedPoetryVersion  = $PinnedPoetryVersion
             PinnedUvVersion      = $PinnedUvVersion
+            AllowPythonInstall   = $AllowPythonInstall
             VenvBackupPath       = $null                # set by New-VenvBackup before step 5b
+            PrechecksWouldAbort  = $false
         }
 
         Write-LogStepStart -Step 'SETUP' -Module 'Core' -Message 'Initialize setup context'
@@ -329,18 +329,24 @@ function Start-Setup {
         } | Out-Null
 
         # Step 0: Pre-setup checks
-        # Runs before anything is modified on disk.  Non-critical failures
-        # (e.g. DigiCert missing) auto-disable the affected feature via AutoFix.
-        # Critical failures ask the user (semi-auto) or throw (autonomous).
-        Invoke-SetupStep -Step '0/13' -Module 'Prechecks' -Message 'Run pre-setup checks' -Mandatory $true -Action {
+        # Runs before anything is modified on disk.  Non-critical failures warn.
+        # Critical failures, including missing DigiCert,
+        # stop real setup before any mutation.
+        Invoke-SetupStep -Step '0/13' -Module 'Prechecks' -Message 'Run pre-setup checks' -Mandatory $true -ReadOnly $true -Action {
             $prechecks = Invoke-Prechecks `
                 -EnableCodeSigning $ctx.EnableCodeSigning `
                 -DigiCertExe       $DigiCertUtilityExe `
                 -NonInteractive    ([bool]$ctx.NonInteractive) `
                 -Ctx               $ctx `
-                -StopOnNonCritical $StopOnPrecheckFailure
+                -StopOnNonCritical $StopOnPrecheckFailure `
+                -ReportOnly        ([bool]$script:setupDryRun)
             if (-not $prechecks.ContinueSetup) {
-                throw 'Setup aborted: prechecks failed and user chose not to continue.'
+                if ($script:setupDryRun) {
+                    $ctx.PrechecksWouldAbort = $true
+                    Write-LogDetail -Key 'dry_run_prechecks' -Value 'real setup would abort before making changes'
+                } else {
+                    throw 'Setup aborted: critical prechecks failed.'
+                }
             }
             Write-LogDetail -Key 'prechecks_passed' -Value $prechecks.AllPassed
             Write-LogDetail -Key 'code_signing_effective' -Value $ctx.EnableCodeSigning
@@ -376,7 +382,7 @@ function Start-Setup {
         }
 
         # Step 1: Parse pyproject.toml
-        Invoke-SetupStep -Step '1/13' -Module 'PyProject' -Message 'Parse project metadata' -Mandatory $true -Action {
+        Invoke-SetupStep -Step '1/13' -Module 'PyProject' -Message 'Parse project metadata' -Mandatory $true -ReadOnly $true -Action {
             $meta = Get-ProjectMetadata -ProjectRoot $ctx.ProjectRoot
             $ctx.ProjectName    = $meta.ProjectName
             $ctx.RequiresPython = $meta.RequiresPython
@@ -386,13 +392,13 @@ function Start-Setup {
         } | Out-Null
 
         # Step 2: Resolve Python interpreter
-        Invoke-SetupStep -Step '2/13' -Module 'Python' -Message 'Resolve Python interpreter' -Mandatory $true -Action {
+        Invoke-SetupStep -Step '2/13' -Module 'Python' -Message 'Resolve Python interpreter' -Mandatory $true -ReadOnly $true -Action {
             $ctx.SelectedPython = Resolve-SelectedPython `
                 -Constraints           $ctx.ParsedConstraints `
                 -RequiresPythonRaw     $ctx.RequiresPython `
                 -VenvDir               $ctx.VenvDir `
                 -ExplicitPythonExePath $ctx.PythonExePath `
-                -AllowInstall `
+                -AllowInstall:([bool]$ctx.AllowPythonInstall) `
                 -NonInteractive:([bool]$ctx.NonInteractive) `
                 -ListMode:([bool]$ctx.ListMode)
             Write-LogDetail -Key 'python_version' -Value $ctx.SelectedPython.Version
@@ -400,15 +406,12 @@ function Start-Setup {
             Write-LogDetail -Key 'python_source'  -Value $ctx.SelectedPython.Source
         } | Out-Null
 
-        # Configure code-signing defaults after Python is known and after
-        # prechecks may have disabled signing.
-        # Skipped in DryRun (no side effects needed) and on non-Windows (DigiCert is Windows-only).
+        # Configure code-signing defaults after Python is known. DigiCert is a
+        # required precheck for this automation, so missing tooling has
+        # already stopped a real run before this point.
         $isWindowsHost = Get-IsWindows
         if ($ctx.EnableCodeSigning -and $isWindowsHost -and -not $script:setupDryRun) {
             Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
-        } elseif ($ctx.EnableCodeSigning -and -not $isWindowsHost) {
-            $ctx.EnableCodeSigning = $false
-            Write-LogDetail -Key 'code_signing' -Value 'disabled (DigiCert is Windows-only)'
         }
 
         # Steps 3-9: Package-manager pipeline (PackageManager.psm1 facade)
@@ -459,7 +462,8 @@ function Start-Setup {
         }
 
         # 5c. Create .venv and pin it to the selected Python interpreter
-        Invoke-SetupStep -Step '5c/13' -Module 'PM' -Message ("Prepare .venv with {0} (Python {1})" -f $ctx.PackageManager, $ctx.SelectedPython.Version) -Mandatory $true -Action {
+        $selectedPythonLabel = if ($ctx.SelectedPython) { $ctx.SelectedPython.Version } else { '<unresolved>' }
+        Invoke-SetupStep -Step '5c/13' -Module 'PM' -Message ("Prepare .venv with {0} (Python {1})" -f $ctx.PackageManager, $selectedPythonLabel) -Mandatory $true -Action {
             Write-LogDetail -Key 'python_exe' -Value $ctx.SelectedPython.Exe
             Write-LogDetail -Key 'venv_dir'   -Value $ctx.VenvDir
             Invoke-PmPrepareVenv -Ctx $ctx
@@ -511,16 +515,21 @@ function Start-Setup {
         }
 
         # 10. Write .pth file - resolve site-packages path dynamically via the venv python
-        $venvPythonExe = Get-VenvPythonExe -VenvDir $ctx.VenvDir
-        try {
-            $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
-            $ctx.SitePackagesDir = $spResult.Trim()
-        } catch {
-            # Fallback to platform-guessed path if python call fails
-            $ctx.SitePackagesDir = if ($env:OS -eq 'Windows_NT') {
-                Join-Path $ctx.VenvDir 'Lib\site-packages'
-            } else {
-                Join-Path $ctx.VenvDir 'lib' | Join-Path -ChildPath "python$($ctx.SelectedPython.Version.Split('.')[0..1] -join '.')" | Join-Path -ChildPath 'site-packages'
+        if ($script:setupDryRun) {
+            $ctx.SitePackagesDir = '<would resolve from .venv python>'
+        } else {
+            $venvPythonExe = Get-VenvPythonExe -VenvDir $ctx.VenvDir
+            try {
+                $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
+                $ctx.SitePackagesDir = $spResult.Trim()
+            } catch {
+                # Fallback to platform-guessed path if python call fails
+                $ctx.SitePackagesDir = if ($env:OS -eq 'Windows_NT') {
+                    Join-Path $ctx.VenvDir 'Lib\site-packages'
+                } else {
+                    $versionPrefix = if ($ctx.SelectedPython) { $ctx.SelectedPython.Version.ToString(2) } else { '3' }
+                    Join-Path $ctx.VenvDir 'lib' | Join-Path -ChildPath "python$versionPrefix" | Join-Path -ChildPath 'site-packages'
+                }
             }
         }
         Invoke-SetupStep -Step '10/13' -Module 'Venv' -Message 'Write project .pth into site-packages' -Mandatory $true -Action {
@@ -540,8 +549,8 @@ function Start-Setup {
         } | Out-Null
 
         # 13. Code signing of venv executables
-        # Uses $ctx.EnableCodeSigning - may have been auto-disabled by Prechecks
-        # if DigiCert was not found on this machine.
+        # Uses $ctx.EnableCodeSigning. Missing DigiCert is a critical precheck,
+        # so a real run never reaches this step without the signer available.
         if ($ctx.EnableCodeSigning) {
             Invoke-SetupStep -Step '13/13' -Module 'CodeSigning' -Message 'Sign generated/downloaded .exe files in .venv\Scripts' -Mandatory $false -Action {
                 # Store in $ctx so the result is visible outside this scriptblock scope.
@@ -576,7 +585,6 @@ function Start-Setup {
                 $configValues = @{
                     PinnedPoetryVersion = $ctx.PinnedPoetryVersion
                     PinnedUvVersion     = $ctx.PinnedUvVersion
-                    IncludeDev          = $ctx.IncludeDev
                 }
                 if ($ctx.PmSource -eq 'cli') {
                     $configValues.PackageManager = $ctx.PackageManager
@@ -588,13 +596,18 @@ function Start-Setup {
         }
 
         # Done
-        Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message 'Setup completed successfully'
+        $doneMessage = if ($ctx.PrechecksWouldAbort) {
+            'Dry run completed; real setup would abort at prechecks'
+        } else {
+            'Setup completed successfully'
+        }
+        Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message $doneMessage
 
         Invoke-SetupStep -Step 'POST' -Module 'Venv' -Message 'Best-effort activate project venv in current shell' -Mandatory $false -Action {
             Invoke-VenvActivation -ProjectRoot $ctx.ProjectRoot
         } | Out-Null
 
-        if (-not $ctx.NonInteractive) {
+        if (-not $ctx.NonInteractive -and -not $script:setupDryRun) {
             Read-Host 'Press Enter to exit'
         }
 

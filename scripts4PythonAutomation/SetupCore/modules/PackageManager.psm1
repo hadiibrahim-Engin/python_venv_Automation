@@ -36,6 +36,7 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UV.psm1')            -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Poetry.psm1')        -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Venv.psm1')          -Force -DisableNameChecking -ErrorAction Stop
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ function Invoke-PmEnsureRuntime {
         'uv' {
             $pinnedUv        = if ($Ctx.ContainsKey('PinnedUvVersion')) { $Ctx.PinnedUvVersion } else { '' }
             $Ctx.UvInfo      = Initialize-UvRuntime `
+                                   -PythonExe      $Ctx.SelectedPython.Exe `
                                    -NonInteractive ([bool]$Ctx.NonInteractive) `
                                    -PinnedVersion  $pinnedUv
             # Generic alias so callers need not know which PM is active.
@@ -163,7 +165,7 @@ function Invoke-PmConfigure {
 
     switch ($Ctx.PackageManager) {
         'uv'     { }  # no-op
-        'poetry' { Set-PoetryConfiguration -PoetryPython $Ctx.PoetryPythonPath }
+        'poetry' { Set-PoetryConfiguration -PoetryPython $Ctx.PoetryPythonPath -ProjectRoot $Ctx.ProjectRoot -Local }
     }
 }
 
@@ -230,6 +232,12 @@ function Invoke-PmPrepareVenv {
             } else {
                 # .venv-Ordner existiert -> NICHT anfassen, nur später uv sync benutzen
                 Write-Host ">>> [Invoke-PmPrepareVenv] uv: .venv EXISTS -> reusing, NO 'uv venv'" -ForegroundColor Magenta
+                Confirm-VenvPythonCompatible `
+                    -VenvDir               $Ctx.VenvDir `
+                    -Constraints           $Ctx.ParsedConstraints `
+                    -RequiresPythonRaw     $Ctx.RequiresPython `
+                    -SelectedPython        $Ctx.SelectedPython `
+                    -RequireSelectedPython ([bool]$Ctx.PythonExePath)
             }
         }
         'poetry' {
@@ -244,6 +252,12 @@ function Invoke-PmPrepareVenv {
                 # .venv-Ordner existiert -> immer wiederverwenden, nicht anfassen
                 Write-Host ">>> .venv EXISTS -> reusing, NO 'poetry env use'" -ForegroundColor Magenta
                 Write-Host ("  Reusing existing virtualenv at {0} (skip 'poetry env use')" -f $venvDir) -ForegroundColor DarkGray
+                Confirm-VenvPythonCompatible `
+                    -VenvDir               $Ctx.VenvDir `
+                    -Constraints           $Ctx.ParsedConstraints `
+                    -RequiresPythonRaw     $Ctx.RequiresPython `
+                    -SelectedPython        $Ctx.SelectedPython `
+                    -RequireSelectedPython ([bool]$Ctx.PythonExePath)
             }
 
             if ($needsCreate) {
