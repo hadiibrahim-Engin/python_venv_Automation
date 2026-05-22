@@ -73,11 +73,17 @@ function Find-AllPythonInterpreters {
         } catch { }
     }
 
-    # 1. where.exe python - all python.exe entries on PATH
+    # 1. PATH - Windows uses where.exe and executable command discovery.
     try {
         $whereOut = & 'where.exe' 'python' 2>$null
         foreach ($line in ($whereOut -split "`r?`n")) { & $tryAdd $line }
     } catch { }
+    foreach ($cmd in (Get-Command 'python*' -ErrorAction SilentlyContinue)) {
+        if ($cmd.CommandType -ne 'Application') { continue }
+        if ($cmd.Name -eq 'py.exe') { continue }
+        if ($cmd.Source -notlike '*.exe') { continue }
+        & $tryAdd $cmd.Source
+    }
 
     # 2. py -0p - Windows Launcher lists all registered versions with full paths
     $pyExe = $null
@@ -105,7 +111,7 @@ function Find-AllPythonInterpreters {
         } catch { }
     }
 
-    # 3. Standard python.org installer locations (brief scan, not exhaustive)
+    # 3. Common Windows install locations.
     $candidateRoots = @()
     if ($env:LOCALAPPDATA) { $candidateRoots += (Join-Path $env:LOCALAPPDATA 'Programs\Python') }
     if ($env:ProgramFiles) { $candidateRoots += $env:ProgramFiles }
@@ -470,73 +476,12 @@ function Find-PythonInstallations {
         } catch { }
     }
 
-    # Detect platform once - used to enable/skip OS-specific sections below.
-    $onWindows = $env:OS -eq 'Windows_NT'
-
-    # 1. PATH - works on all platforms.
-    #    Windows: accept .exe files, skip py.exe launcher.
-    #    macOS/Linux: accept any Application command named python* (no extension).
+    # 1. PATH - accept Windows executables, skip the py.exe launcher.
     foreach ($cmd in (Get-Command 'python*' -ErrorAction SilentlyContinue)) {
         if ($cmd.CommandType -ne 'Application') { continue }
         if ($cmd.Name -eq 'py.exe') { continue }
-        if ($onWindows -and $cmd.Source -notlike '*.exe') { continue }
+        if ($cmd.Source -notlike '*.exe') { continue }
         & $addExe $cmd.Source
-    }
-
-    # 1b. macOS / Linux well-known paths.
-    #     These are skipped on Windows (exe does not exist → addExe no-ops).
-    if (-not $onWindows) {
-        $homeDir = $env:HOME
-        foreach ($exe in @(
-            '/usr/bin/python3',
-            '/usr/bin/python',
-            '/usr/local/bin/python3',
-            '/usr/local/bin/python',
-            '/opt/homebrew/bin/python3',     # Apple Silicon Homebrew
-            '/usr/local/opt/python3/bin/python3', # Intel Homebrew
-            '/opt/local/bin/python3'          # MacPorts
-        )) {
-            & $addExe $exe
-        }
-        # Homebrew versioned pythons: /opt/homebrew/opt/python@3.X/bin/python3.X
-        foreach ($brewDir in @('/opt/homebrew/opt', '/usr/local/opt')) {
-            if (-not (Test-Path $brewDir -PathType Container)) { continue }
-            foreach ($d in (Get-ChildItem $brewDir -Directory -Filter 'python@3*' -ErrorAction SilentlyContinue)) {
-                & $addExe (Join-Path $d.FullName 'bin/python3')
-                foreach ($f in (Get-ChildItem (Join-Path $d.FullName 'bin') -Filter 'python3.*' -ErrorAction SilentlyContinue)) {
-                    & $addExe $f.FullName
-                }
-            }
-        }
-        # pyenv shims: ~/.pyenv/versions/3.X.Y/bin/python3
-        if ($homeDir) {
-            $pyenvVersions = Join-Path $homeDir '.pyenv/versions'
-            if (Test-Path $pyenvVersions -PathType Container) {
-                foreach ($v in (Get-ChildItem $pyenvVersions -Directory -ErrorAction SilentlyContinue)) {
-                    & $addExe (Join-Path $v.FullName 'bin/python3')
-                    & $addExe (Join-Path $v.FullName 'bin/python')
-                }
-            }
-        }
-        # Conda on macOS: ~/opt/anaconda3, ~/miniconda3, ~/miniforge3
-        if ($homeDir) {
-            foreach ($base in @(
-                (Join-Path $homeDir 'opt/anaconda3'),
-                (Join-Path $homeDir 'anaconda3'),
-                (Join-Path $homeDir 'miniconda3'),
-                (Join-Path $homeDir 'miniforge3'),
-                '/opt/anaconda3',
-                '/opt/miniconda3'
-            )) {
-                & $addExe (Join-Path $base 'bin/python3')
-                $envsDir = Join-Path $base 'envs'
-                if (Test-Path $envsDir -PathType Container) {
-                    foreach ($e in (Get-ChildItem $envsDir -Directory -ErrorAction SilentlyContinue)) {
-                        & $addExe (Join-Path $e.FullName 'bin/python3')
-                    }
-                }
-            }
-        }
     }
 
     # 2. Windows Registry
@@ -567,7 +512,7 @@ function Find-PythonInstallations {
         }
     }
 
-    # 3. Common Windows install directories (silently skipped on macOS/Linux).
+    # 3. Common Windows install directories.
     foreach ($base in @(
         "$env:LOCALAPPDATA\Programs\Python",
         "$env:APPDATA\Python",
@@ -582,9 +527,7 @@ function Find-PythonInstallations {
         & $addExe (Join-Path $base 'python.exe')
     }
 
-    # 3b. Scan all Python3* directories directly under Program Files / LocalAppData
-    #     Covers default installer paths like C:\Program Files\Python311\
-    #     Filter nulls first - env vars are absent on macOS/Linux.
+    # 3b. Scan all Python3* directories directly under Program Files / LocalAppData.
     foreach ($root in @($env:ProgramFiles, "${env:ProgramFiles(x86)}", "$env:LOCALAPPDATA\Programs") | Where-Object { $_ }) {
         if (-not (Test-Path $root -PathType Container)) { continue }
         foreach ($dir in (Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
@@ -593,7 +536,7 @@ function Find-PythonInstallations {
         }
     }
 
-    # 4. Anaconda / Miniconda
+    # 4. Windows Anaconda / Miniconda
     foreach ($base in @(
         "$env:LOCALAPPDATA\Continuum\anaconda3",
         "$env:USERPROFILE\anaconda3",
@@ -617,17 +560,13 @@ function Find-PythonInstallations {
     }
 
     # 6. py.exe Windows Launcher - reads registry directly, finds versions not on PATH.
-    #    This is the most reliable source right after a fresh install (registry is updated
-    #    before PATH propagates to the current process).  Windows-only.
     $pyLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
     if (-not $pyLauncher -and $env:SystemRoot) {
-        # py.exe ships with Python 3.3+ and lives in System32 on most installs.
         $systemPy = Join-Path $env:SystemRoot 'py.exe'
         if (Test-Path $systemPy -PathType Leaf) { $pyLauncher = $systemPy }
     }
     if ($pyLauncher) {
         $pyExe = if ($pyLauncher -is [string]) { $pyLauncher } else { $pyLauncher.Source }
-        # Query the launcher for each plausible major.minor version.
         foreach ($ver in @('3.14','3.13','3.12','3.11','3.10','3.9','3.8')) {
             try {
                 $found = & "$pyExe" "-$ver" -c 'import sys; print(sys.executable)' 2>$null

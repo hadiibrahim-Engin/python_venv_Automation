@@ -40,20 +40,14 @@ function Get-UvExe {
 <#
 .SYNOPSIS
     Returns the full path to the uv executable, or $null when not found.
-    Checks PATH first, then common pip install locations.
+    Checks PATH first, then common Windows pip install locations.
 #>
     $cmd = Get-Command 'uv' -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
-    # Fallback: pip/uv default on Linux/macOS
-    $posixFallback = Resolve-Path '~/.local/bin/uv' -ErrorAction SilentlyContinue
-    if ($posixFallback -and (Test-Path -LiteralPath $posixFallback.Path -PathType Leaf)) {
-        return $posixFallback.Path
-    }
-
     # Fallback: pip --user install on Windows lands in %APPDATA%\Python\Scripts\ or
     # %APPDATA%\Python\PythonXXX\Scripts\ depending on the pip version.
-    if ($env:OS -eq 'Windows_NT' -and $env:APPDATA) {
+    if ($env:APPDATA) {
         foreach ($pattern in @(
             (Join-Path $env:APPDATA 'Python\Scripts\uv.exe'),
             (Join-Path $env:APPDATA 'Python\Python*\Scripts\uv.exe')

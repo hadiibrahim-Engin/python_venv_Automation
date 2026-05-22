@@ -7,7 +7,7 @@
 #   1. cp pyproject.toml pyproject.toml.bak
 #   2. cp pyproject.uv-sample.toml pyproject.toml
 #   3. rm -f .setup-config.json   (delete any cached PM choice)
-#   4. .\scripts\setup-core.ps1 -DryRun
+#   4. .\scripts4PythonAutomation\setup-core.ps1 -DryRun
 #      => the PM step should print:
 #         decided_by: [tool.uv] section present, no [tool.poetry]
 #         selected:   uv

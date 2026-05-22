@@ -42,7 +42,7 @@ function warn { param([string]$t) Write-Host "  [!] $t" -ForegroundColor Yellow 
 h1 'pyfactory / pythonAutomation — Setup Reference'
 # ===========================================================================
 ln
-ln 'Automates Python 3.11 virtual-environment creation and dependency installation.'
+ln 'Windows-only automation for Python 3.11 virtual-environment creation and dependency installation.'
 ln 'Supports two package managers (Poetry, UV — auto-detected from pyproject.toml),'
 ln 'required DigiCert code signing, DryRun mode, rollback on failure, and three Python-selection modes.'
 
@@ -58,6 +58,7 @@ ln 'Usage    :'
 ex '.\scripts4PythonAutomation\setup-core.ps1  [options...]'
 ln
 warn 'Must be run from a PowerShell console (pwsh.exe or powershell.exe).'
+warn 'Windows-only: Start-Setup aborts immediately on non-Windows hosts.'
 warn 'If downloaded-file metadata blocks imports, explicitly unblock this toolkit:'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -UnblockScripts -DryRun'
 
@@ -171,7 +172,8 @@ h2 '-DryRun  [switch]   (default: off)'
 # ---------------------------------------------------------------------------
 ln
 ln '  Prints every pipeline step header and detail lines but executes no actions.'
-ln '  The file system is not modified. Required precheck failures are reported'
+ln '  DryRun still requires Windows. The file system is not modified.'
+ln '  Required precheck failures are reported'
 ln '  as "real setup would abort", then the remaining plan is still printed.'
 ln
 ln '  Examples:'
@@ -254,7 +256,7 @@ h2 'Venv control'
 ln
 kv '-ProjectRoot <string>'       "Project root containing pyproject.toml.  Default: current directory."
 kv '-ForceRecreateVenv <bool>'   "Remove and recreate .venv on every run.  Default: `$false."
-kv '-SkipInstall <bool>'         "Skip dependency installation (Steps 8-9).  Default: `$false."
+kv '-SkipPoetryInstall <bool>'   "Skip Poetry dependency installation.  Default: `$false."
 kv '-NonInteractive <bool>'      "No pause prompts; exceptions propagate instead.  Default: `$false."
 
 h2 'Code signing'
@@ -265,7 +267,7 @@ kv '-DigiCertUtilityExe <string>'     "Path to DigiCertUtil.exe."
 kv '                                ' "Default: C:\Program Files\DigiCertUtility\DigiCertUtil.exe"
 kv '-KernelDriverSigning <bool>'      "Use kernel-driver signing mode.  Default: `$false."
 kv '-SignPoetryOnly <bool>'           "Sign only the PM shim, not all .venv\Scripts exes.  Default: `$false."
-kv '-RequirePoetryShimSigning <bool>' "Make PM shim signing a mandatory step.  Default: `$true."
+kv '-RequirePmShimSigning <bool>'     "Make PM shim signing a mandatory step.  Default: `$true."
 
 h2 'Programmatic example'
 ln
@@ -281,7 +283,7 @@ ex '           -UpdateDependencies $false'
 h1 'COMMON USAGE RECIPES'
 # ===========================================================================
 
-h2 'Fresh setup on a new machine  (default Poetry, interactive Python pick)'
+h2 'Fresh setup on a new machine  (auto-detected package manager, interactive Python pick)'
 ex '.\scripts4PythonAutomation\setup-core.ps1'
 
 h2 'Fresh setup with UV as package manager'
@@ -315,6 +317,12 @@ ex '. .\scripts4PythonAutomation\activate-venv.ps1'
 h2 'Downloaded-file metadata blocks module import'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -UnblockScripts -DryRun'
 
+h2 'Start from a pyproject template'
+ex 'Copy-Item .\templates\pyproject.uv.toml .\pyproject.toml'
+ex 'Copy-Item .\templates\pyproject.poetry.toml .\pyproject.toml'
+ex 'Remove-Item .setup-config.json -ErrorAction SilentlyContinue'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -PackageManager auto -DryRun'
+
 
 # ===========================================================================
 h1 'PYTHON SELECTION — INTERACTIVE PROMPT'
@@ -346,6 +354,7 @@ ln "                               Validated against pyproject.toml constraints.
 h1 '13-STEP PIPELINE OVERVIEW'
 # ===========================================================================
 ln '  Each step is logged with its status (OK / WARN / ERROR) and duration.'
+ln '  Before step 0, Start-Setup verifies that the host is Windows and aborts otherwise.'
 ln
 kv ' 0/13  Prechecks'          'Network diagnostics + required DigiCert check.'
 kv ' 1/13  Parse metadata'     'Read pyproject.toml — project name, requires-python.'
@@ -407,6 +416,18 @@ kv 'Venv creation'        'poetry env use <python>   uv venv --python <exe>'
 kv 'Git dependencies'     '[tool.poetry.dependencies] (source URL)    [tool.uv.sources]'
 kv 'Auto-install'         'Yes (via pipx / pip)       Yes (via selected Python + pip)'
 kv 'Signed on install'    'Yes (poetry.exe shim)      Yes (uv.exe binary)'
+
+
+# ===========================================================================
+h1 'PYPROJECT TEMPLATES'
+# ===========================================================================
+ln
+kv 'UV template'       '.\templates\pyproject.uv.toml'
+kv 'Poetry template'   '.\templates\pyproject.poetry.toml'
+ln
+ln '  The UV template contains [project] and [tool.uv], with no [tool.poetry].'
+ln '  The Poetry template contains [tool.poetry] and poetry.core.masonry.api,'
+ln '  with no [tool.uv]. This keeps package-manager auto-detection deterministic.'
 
 
 # ===========================================================================

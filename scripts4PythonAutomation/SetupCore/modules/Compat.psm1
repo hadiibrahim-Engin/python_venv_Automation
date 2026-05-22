@@ -78,16 +78,10 @@ function Get-CommandSource {
     Returns $true when the current process is running on Windows.
 
 .DESCRIPTION
-    Centralises the $env:OS -eq 'Windows_NT' check so the rest of the
-    codebase avoids copy-pasting this platform guard.
+    Centralises the Windows host check used by Start-Setup's entry guard.
 #>
 function Get-IsWindows {
     return $env:OS -eq 'Windows_NT'
-}
-
-function Get-IsLinux {
-    # $IsLinux is a PS 6+ automatic variable; always $null on PS 5.1 (Windows-only)
-    return ($IsLinux -eq $true)
 }
 
 <#
@@ -95,11 +89,8 @@ function Get-IsLinux {
     Returns the path to the Python executable inside a virtual environment.
 
 .DESCRIPTION
-    Encapsulates the Windows / POSIX path difference so callers need not
-    inline the platform check everywhere.
-
-        Windows : <VenvDir>\Scripts\python.exe
-        POSIX   : <VenvDir>/bin/python
+    This automation is Windows-only, so in-project virtual environments always
+    use the Scripts\python.exe layout.
 
 .PARAMETER VenvDir
     Absolute path to the .venv directory.
@@ -109,11 +100,7 @@ function Get-IsLinux {
 #>
 function Get-VenvPythonExe {
     param([Parameter(Mandatory=$true)][string] $VenvDir)
-    if (Get-IsWindows) {
-        Join-Path $VenvDir 'Scripts\python.exe'
-    } else {
-        Join-Path $VenvDir 'bin/python'
-    }
+    Join-Path $VenvDir 'Scripts\python.exe'
 }
 
-Export-ModuleMember -Function Get-CommandSource, Get-IsWindows, Get-IsLinux, Get-VenvPythonExe
+Export-ModuleMember -Function Get-CommandSource, Get-IsWindows, Get-VenvPythonExe

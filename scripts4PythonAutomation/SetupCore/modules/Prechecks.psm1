@@ -110,17 +110,6 @@ function Test-DigiCertAvailable {
 #>
     param([Parameter(Mandatory=$true)][string] $DigiCertExe)
 
-    if ($env:OS -ne 'Windows_NT') {
-        return [pscustomobject]@{
-            Check    = 'DigiCert'
-            Passed   = $false
-            Critical = $true
-            Message  = 'DigiCert signing is required, but this automation can only run DigiCertUtil.exe on Windows.'
-            Fix      = 'Run setup on Windows with DigiCert Utility installed, or pass -DigiCertUtilityExe with the correct path.'
-            AutoFix  = $null
-        }
-    }
-
     if (Test-Path -LiteralPath $DigiCertExe -PathType Leaf) {
         return [pscustomobject]@{
             Check    = 'DigiCert'

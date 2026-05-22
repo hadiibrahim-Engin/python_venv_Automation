@@ -1,0 +1,47 @@
+# =============================================================================
+# pyproject.toml template for uv usage
+#
+# Use this when the project should be managed by uv.
+#
+# Setup auto-detection signals:
+#   - [project] is present
+#   - [tool.uv] is present
+#   - [tool.poetry] is absent
+#
+# To use:
+#   1. Copy this file to your project root as pyproject.toml.
+#   2. Edit name, description, dependencies, and Python range.
+#   3. Delete .setup-config.json if a package manager was previously cached.
+#   4. Run .\scripts4PythonAutomation\setup-core.ps1 -PackageManager auto
+# =============================================================================
+
+[project]
+name = "your-project-name"
+version = "0.1.0"
+description = "Short project description."
+requires-python = ">=3.11, <3.13"
+readme = "README.md"
+
+dependencies = [
+    "requests>=2.31",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+dev-dependencies = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]

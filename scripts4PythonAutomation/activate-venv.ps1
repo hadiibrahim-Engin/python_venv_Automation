@@ -48,17 +48,8 @@ if (-not $venvPath) {
     $venvPath = $venvCandidates[0]
 }
 
-$onWindows      = $env:OS -eq 'Windows_NT'
-$activateScript = if ($onWindows) {
-    Join-Path $venvPath 'Scripts\Activate.ps1'
-} else {
-    Join-Path $venvPath 'bin/Activate.ps1'
-}
-$venvPython = if ($onWindows) {
-    Join-Path $venvPath 'Scripts\python.exe'
-} else {
-    Join-Path $venvPath 'bin/python'
-}
+$activateScript = Join-Path $venvPath 'Scripts\Activate.ps1'
+$venvPython     = Join-Path $venvPath 'Scripts\python.exe'
 
 if (-not (Test-Path $venvPath)) {
     Write-Host "ERROR: .venv not found at: $venvPath" -ForegroundColor Red

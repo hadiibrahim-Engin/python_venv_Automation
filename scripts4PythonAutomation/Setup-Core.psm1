@@ -255,6 +255,7 @@ function Start-Setup {
 
     try {
         Set-StrictMode -Version Latest
+        $ctx = $null
 
         # Initialise script-scope state used by Invoke-SetupStep (defined at module scope).
         # setupCurrentStep / setupCurrentModule track which step is executing so the
@@ -262,6 +263,10 @@ function Start-Setup {
         $script:setupCurrentStep   = 'INIT'
         $script:setupCurrentModule = 'Core'
         $script:setupDryRun        = [bool]$DryRun
+
+        if (-not (Get-IsWindows)) {
+            throw 'This setup automation is Windows-only. Run it from Windows PowerShell or pwsh on Windows.'
+        }
 
         # Detach any active virtual environment
         $env:VIRTUAL_ENV   = $null
@@ -409,8 +414,7 @@ function Start-Setup {
         # Configure code-signing defaults after Python is known. DigiCert is a
         # required precheck for this automation, so missing tooling has
         # already stopped a real run before this point.
-        $isWindowsHost = Get-IsWindows
-        if ($ctx.EnableCodeSigning -and $isWindowsHost -and -not $script:setupDryRun) {
+        if ($ctx.EnableCodeSigning -and -not $script:setupDryRun) {
             Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
         }
 
@@ -523,13 +527,8 @@ function Start-Setup {
                 $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
                 $ctx.SitePackagesDir = $spResult.Trim()
             } catch {
-                # Fallback to platform-guessed path if python call fails
-                $ctx.SitePackagesDir = if ($env:OS -eq 'Windows_NT') {
-                    Join-Path $ctx.VenvDir 'Lib\site-packages'
-                } else {
-                    $versionPrefix = if ($ctx.SelectedPython) { $ctx.SelectedPython.Version.ToString(2) } else { '3' }
-                    Join-Path $ctx.VenvDir 'lib' | Join-Path -ChildPath "python$versionPrefix" | Join-Path -ChildPath 'site-packages'
-                }
+                # Windows venv fallback if python call fails.
+                $ctx.SitePackagesDir = Join-Path $ctx.VenvDir 'Lib\site-packages'
             }
         }
         Invoke-SetupStep -Step '10/13' -Module 'Venv' -Message 'Write project .pth into site-packages' -Mandatory $true -Action {

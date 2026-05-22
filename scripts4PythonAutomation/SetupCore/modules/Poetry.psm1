@@ -75,16 +75,15 @@ function Test-PoetryAvailable {
     first one that exists, or $null when neither is present.
 #>
 function Get-PoetryShimPath {
-    # Check PATH first - works everywhere after pipx/pip install.
+    # Check PATH first - works after pipx/pip install.
     $cmd = Get-Command 'poetry' -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
-    # Known install locations (null-safe: skip when env var is absent on macOS/Linux).
+    # Known Windows install locations.
     $userProfile = [System.Environment]::GetFolderPath('UserProfile')
     $candidates = [System.Collections.Generic.List[string]]::new()
     if ($userProfile) {
-        $candidates.Add((Join-Path $userProfile '.local/bin/poetry'))       # pipx / astral on macOS/Linux
-        $candidates.Add((Join-Path $userProfile '.local\bin\poetry.exe'))   # pipx on Windows
+        $candidates.Add((Join-Path $userProfile '.local\bin\poetry.exe'))   # pipx
     }
     if ($env:APPDATA) {
         $candidates.Add((Join-Path $env:APPDATA 'Python\Scripts\poetry.exe'))  # legacy pip install
@@ -233,8 +232,8 @@ function Initialize-PoetryRuntime {
         } catch { $installed = $false }
 
         if ($installed) {
-            # pipx installs to ~/.local/bin - add to PATH if not already there.
-            $localBin = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.local/bin'
+            # pipx installs to %USERPROFILE%\.local\bin - add to PATH if not already there.
+            $localBin = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.local\bin'
             if ((Test-Path $localBin -PathType Container) -and ($env:PATH.IndexOf($localBin, [StringComparison]::OrdinalIgnoreCase) -lt 0)) {
                 $env:PATH = "$localBin$([System.IO.Path]::PathSeparator)$env:PATH"
             }

@@ -68,23 +68,11 @@ function Confirm-VenvExists {
         throw '.venv directory was not created. Check the package-manager output above.'
     }
 
-    $onWindows = $env:OS -eq 'Windows_NT'
     $requiredFiles = @(
-        [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'pyvenv.cfg'))
+        [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'pyvenv.cfg')),
+        [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\Activate.ps1')),
+        [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\python.exe'))
     )
-
-    # Platform-specific activation script
-    if ($onWindows) {
-        $requiredFiles += @(
-            [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\Activate.ps1')),
-            [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\python.exe'))
-        )
-    } else {
-        $requiredFiles += @(
-            [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'bin/activate')),
-            [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'bin/python'))
-        )
-    }
 
     $missing = @($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
     if ($missing.Count -gt 0) {

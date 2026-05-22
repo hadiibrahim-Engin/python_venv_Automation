@@ -86,12 +86,8 @@ function Remove-PathRobust {
             # Clear read-only / hidden / system attributes — native bulk
             # operations are orders of magnitude faster than a PowerShell
             # Get-ChildItem -Recurse loop for large venvs (thousands of files).
-            if ($env:OS -eq 'Windows_NT') {
-                # attrib /S applies to all files in subdirs; /D includes dirs too.
-                try { & "$env:SystemRoot\System32\attrib.exe" -R -H -S /S /D $Path } catch { }
-            } else {
-                try { chmod -R u+w $Path } catch { }
-            }
+            # attrib /S applies to all files in subdirs; /D includes dirs too.
+            try { & "$env:SystemRoot\System32\attrib.exe" -R -H -S /S /D $Path } catch { }
 
             Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
             return $true
@@ -128,15 +124,8 @@ function Move-PathToQuarantine {
         $pathBytes = [System.Text.Encoding]::Unicode.GetBytes($dst)
         $pathB64   = [Convert]::ToBase64String($pathBytes)
         $cmd = "Start-Sleep 5; Try { `$p = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$pathB64')); Remove-Item -Recurse -Force -LiteralPath `$p } Catch {}"
-        if ($env:OS -eq 'Windows_NT') {
-            $ps = [System.IO.Path]::GetFullPath("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe")
-            Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-Command', $cmd) | Out-Null
-        } else {
-            $pwshCmd = Get-Command 'pwsh' -ErrorAction SilentlyContinue
-            if ($pwshCmd) {
-                Start-Process -FilePath $pwshCmd.Source -ArgumentList @('-NoProfile', '-Command', $cmd) | Out-Null
-            }
-        }
+        $ps = [System.IO.Path]::GetFullPath("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe")
+        Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-Command', $cmd) | Out-Null
 
         return $dst
     } catch {
@@ -194,9 +183,8 @@ function Remove-StaleQuarantines {
 function Add-PythonScriptsDirToPath {
     param([Parameter(Mandatory=$true)][string] $PythonExe)
     try {
-        # Probe both system and user scripts dirs — pip may install to either.
-        # On Windows the user scheme is 'nt_user'; on Linux/macOS it is 'posix_user'.
-        $pyCode = "import sysconfig,os; s=sysconfig.get_path('scripts'); u=sysconfig.get_path('scripts',os.name+'_user'); print(os.pathsep.join(d for d in [s,u] if d))"
+        # Probe both system and Windows user scripts dirs; pip may install to either.
+        $pyCode = "import sysconfig,os; s=sysconfig.get_path('scripts'); u=sysconfig.get_path('scripts','nt_user'); print(os.pathsep.join(d for d in [s,u] if d))"
         $output = (& $PythonExe -c $pyCode 2>$null).Trim()
         foreach ($scriptsDir in ($output -split [System.IO.Path]::PathSeparator)) {
             $scriptsDir = $scriptsDir.Trim()

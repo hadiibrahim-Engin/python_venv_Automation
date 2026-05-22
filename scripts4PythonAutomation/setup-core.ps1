@@ -4,7 +4,7 @@
 
 # Author  : Hadi Ibrahim
 #
-# Entry point for the Python environment setup pipeline.
+# Windows-only entry point for the Python environment setup pipeline.
 # Run directly from a PowerShell console (pwsh or powershell.exe):
 #
 #   .\scripts4PythonAutomation\setup-core.ps1                              # auto-detects uv or poetry
@@ -55,7 +55,7 @@ param(
     [switch] $NonInteractive,
 
     [Parameter()]
-    [bool] $EnableCodeSigning = $true,
+    [object] $EnableCodeSigning = $true,
 
     [Parameter()]
     [string] $DigiCertUtilityExe = $(if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe' }),
@@ -67,7 +67,7 @@ param(
     [switch] $SignPoetryOnly,
 
     [Parameter()]
-    [bool] $RequirePmShimSigning = $true,
+    [object] $RequirePmShimSigning = $true,
 
     [Parameter()]
     [string] $PinnedPoetryVersion = '',
@@ -89,11 +89,34 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Convert-SetupBool {
+    param(
+        [Parameter(Mandatory=$true)][object] $Value,
+        [Parameter(Mandatory=$true)][string] $Name
+    )
+
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [int]) {
+        if ($Value -eq 0) { return $false }
+        if ($Value -eq 1) { return $true }
+    }
+
+    $text = ([string]$Value).Trim()
+    switch -Regex ($text) {
+        '^(true|1|yes|on)$'  { return $true }
+        '^(false|0|no|off)$' { return $false }
+    }
+
+    throw ("Invalid boolean value for -{0}: '{1}'. Use true/false, 1/0, yes/no, or on/off." -f $Name, $Value)
+}
+
 # The Python interpreter prompt was moved inside Start-Setup (after prechecks).
 # Here we only capture explicit CLI overrides so they can be forwarded to the subprocess.
 $resolvedPythonExePath = if ($PSBoundParameters.ContainsKey('PythonExePath')) { $PythonExePath } else { $null }
 $resolvedListMode      = [bool]$ListMode
 $resolvedNonInteractive = [bool]$NonInteractive -or [bool]$DryRun -or ($env:CI -match '^(1|true|yes)$')
+$resolvedEnableCodeSigning = Convert-SetupBool -Value $EnableCodeSigning -Name 'EnableCodeSigning'
+$resolvedRequirePmShimSigning = Convert-SetupBool -Value $RequirePmShimSigning -Name 'RequirePmShimSigning'
 
 # VS Code isolation
 # VS Code's PowerShell extension opens every file passed to Import-Module in the
@@ -138,7 +161,7 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
         $forwardArgs += @('-NonInteractive')
     }
     if ($PSBoundParameters.ContainsKey('EnableCodeSigning')) {
-        $forwardArgs += @('-EnableCodeSigning', $EnableCodeSigning)
+        $forwardArgs += @('-EnableCodeSigning', $resolvedEnableCodeSigning)
     }
     if ($PSBoundParameters.ContainsKey('DigiCertUtilityExe')) {
         $forwardArgs += @('-DigiCertUtilityExe', $DigiCertUtilityExe)
@@ -150,7 +173,7 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
         $forwardArgs += @('-SignPoetryOnly')
     }
     if ($PSBoundParameters.ContainsKey('RequirePmShimSigning')) {
-        $forwardArgs += @('-RequirePmShimSigning', $RequirePmShimSigning)
+        $forwardArgs += @('-RequirePmShimSigning', $resolvedRequirePmShimSigning)
     }
     if ($PinnedPoetryVersion) {
         $forwardArgs += @('-PinnedPoetryVersion', $PinnedPoetryVersion)
@@ -214,11 +237,11 @@ try {
         ForceRecreateVenv  = [bool]$ForceRecreateVenv
         SkipPoetryInstall  = $false
         NonInteractive     = $resolvedNonInteractive
-        EnableCodeSigning  = $EnableCodeSigning
+        EnableCodeSigning  = $resolvedEnableCodeSigning
         DigiCertUtilityExe = $DigiCertUtilityExe
         KernelDriverSigning = [bool]$KernelDriverSigning
         SignPoetryOnly     = [bool]$SignPoetryOnly
-        RequirePmShimSigning = $RequirePmShimSigning
+        RequirePmShimSigning = $resolvedRequirePmShimSigning
         UpdateDependencies = [bool]$UpdateDependencies
         IncludeDev         = (-not [bool]$ExcludeDev)
         ListMode           = $resolvedListMode

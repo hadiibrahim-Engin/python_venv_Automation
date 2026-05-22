@@ -1,8 +1,8 @@
 # =============================================================================
 # Run setup:
-#   .\scripts\setup-core.ps1                  # auto-detect (→ uv)
-#   .\scripts\setup-core.ps1 -DryRun          # preview only
-#   .\scripts\setup-core.ps1 -ExcludeDev      # prod deps only
+#   .\scripts4PythonAutomation\setup-core.ps1                  # auto-detect (→ uv)
+#   .\scripts4PythonAutomation\setup-core.ps1 -DryRun          # preview only
+#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev      # prod deps only
 # =============================================================================
 
 # PEP 621 project metadata (used by uv)
