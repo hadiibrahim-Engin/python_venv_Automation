@@ -43,7 +43,10 @@ param(
     # By default setup stops when any precheck fails (even auto-fixed non-critical ones).
     # Pass this switch to allow setup to continue past precheck failures.
     [Parameter()]
-    [switch] $ContinueOnPrecheckFailure
+    [switch] $ContinueOnPrecheckFailure,
+
+    [Parameter()]
+    [switch] $RecreateVenv
 )
 
 Set-StrictMode -Version Latest
@@ -133,7 +136,7 @@ Import-Module $rootModule -Force
 try {
     $setupParams = @{
         ProjectRoot        = $ProjectRoot
-        ForceRecreateVenv  = $true
+        ForceRecreateVenv  = [bool]$RecreateVenv
         SkipPoetryInstall  = $false
         NonInteractive     = $false
         UpdateDependencies = [bool]$UpdateDependencies

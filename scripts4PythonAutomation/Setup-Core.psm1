@@ -201,7 +201,7 @@ function Start-Setup {
         [string] $ProjectRoot = (Get-Location).Path,
 
         [Parameter()]
-        [bool] $ForceRecreateVenv = $true,
+        [bool] $ForceRecreateVenv = $false,
 
         [Parameter()]
         [bool] $SkipPoetryInstall = $false,

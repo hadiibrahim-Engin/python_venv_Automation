@@ -185,7 +185,18 @@ function Invoke-PmCleanEnvs {
 
     switch ($Ctx.PackageManager) {
         'uv'     { }  # no-op
-        'poetry' { Remove-PoetryEnvs -PoetryPython $Ctx.PoetryPythonPath -ProjectRoot $Ctx.ProjectRoot }
+        'poetry' {
+            if ($Ctx.ForceRecreateVenv) {
+                # Nur wenn der Benutzer explizit -RecreateVenv/-ForceRecreateVenv angefordert hat:
+                Write-Host ">>> [Invoke-PmCleanEnvs] Poetry: running 'env remove --all' because ForceRecreateVenv = true" -ForegroundColor Magenta
+                Remove-PoetryEnvs `
+                    -PoetryPython $Ctx.PoetryPythonPath `
+                    -ProjectRoot  $Ctx.ProjectRoot
+            } else {
+                # Normaler Lauf: nichts löschen
+                Write-Host ">>> [Invoke-PmCleanEnvs] Poetry: skipping 'env remove --all' (ForceRecreateVenv = false)" -ForegroundColor Magenta
+            }
+        }
     }
 }
 
@@ -207,17 +218,42 @@ function Invoke-PmPrepareVenv {
 
     switch ($Ctx.PackageManager) {
         'uv' {
-            Invoke-UvVenv `
-                -PythonExe $Ctx.SelectedPython.Exe `
-                -VenvDir   $Ctx.VenvDir `
-                -UvExe     $Ctx.UvInfo.Exe
+            $venvDir = $Ctx.VenvDir
+
+            if (-not (Test-Path $venvDir -PathType Container)) {
+                # .venv-Ordner existiert noch nicht -> neu anlegen
+                Write-Host ">>> [Invoke-PmPrepareVenv] uv: .venv does NOT exist -> running 'uv venv'" -ForegroundColor Magenta
+                Invoke-UvVenv `
+                    -PythonExe $Ctx.SelectedPython.Exe `
+                    -VenvDir   $Ctx.VenvDir `
+                    -UvExe     $Ctx.UvInfo.Exe
+            } else {
+                # .venv-Ordner existiert -> NICHT anfassen, nur später uv sync benutzen
+                Write-Host ">>> [Invoke-PmPrepareVenv] uv: .venv EXISTS -> reusing, NO 'uv venv'" -ForegroundColor Magenta
+            }
         }
         'poetry' {
-            Use-PoetryPython `
-                -PoetryPython $Ctx.PoetryPythonPath `
-                -PythonExe    $Ctx.SelectedPython.Exe `
-                -ProjectRoot  $Ctx.ProjectRoot
+            $venvDir = $Ctx.VenvDir
+            $needsCreate = $false
+
+            if (-not (Test-Path $venvDir -PathType Container)) {
+                # .venv-Ordner existiert überhaupt nicht -> neu anlegen
+                Write-Host ">>> .venv existiert NICHT -> needsCreate = true, 'poetry env use' wird aufgerufen" -ForegroundColor Magenta
+                $needsCreate = $true
+            } else {
+                # .venv-Ordner existiert -> immer wiederverwenden, nicht anfassen
+                Write-Host ">>> .venv EXISTS -> reusing, NO 'poetry env use'" -ForegroundColor Magenta
+                Write-Host ("  Reusing existing virtualenv at {0} (skip 'poetry env use')" -f $venvDir) -ForegroundColor DarkGray
+            }
+
+            if ($needsCreate) {
+                Use-PoetryPython `
+                    -PoetryPython $Ctx.PoetryPythonPath `
+                    -PythonExe    $Ctx.SelectedPython.Exe `
+                    -ProjectRoot  $Ctx.ProjectRoot
+            }
         }
+    
     }
 }
 
