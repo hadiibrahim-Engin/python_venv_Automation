@@ -71,7 +71,20 @@ function ConvertTo-VersionConstraints {
         }
         if ($part -match '^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+)*)') {
             try {
-                $result.Add(@{ Op = $Matches[1]; Version = [Version]$Matches[2] })
+                $op = $Matches[1]
+                $versionText = $Matches[2]
+                $version = [Version]$versionText
+
+                # For interpreter selection, "==3.11" means the Python 3.11
+                # line, not only the non-existent/rare exact patch 3.11.0.
+                # Expand it to >=3.11,<3.12 so installed patches like 3.11.9
+                # are accepted on subsequent setup runs.
+                if ($op -eq '==' -and (($versionText -split '\.').Count -eq 2)) {
+                    $result.Add(@{ Op = '>='; Version = $version })
+                    $result.Add(@{ Op = '<';  Version = [Version]("{0}.{1}" -f $version.Major, ($version.Minor + 1)) })
+                } else {
+                    $result.Add(@{ Op = $op; Version = $version })
+                }
             } catch {
                 Write-Host ("Warning: could not parse version token '{0}' -- skipping." -f $part) -ForegroundColor DarkYellow
             }

@@ -89,7 +89,9 @@ Do not run that script directly. It is meant to modify the current shell session
 - `-NonInteractive` disables prompts and lets errors fail fast.
 - `-ForceRecreateVenv` removes and rebuilds `.venv`.
 - `-DigiCertUtilityExe` points at `DigiCertUtil.exe` when it is not installed at the default path.
-- `-AllowPythonInstall` permits setup to download and run a verified python.org Windows installer if no compatible Python exists.
+- Python auto-install is enabled by default when no compatible interpreter exists.
+- `-SkipPythonInstall` disables the python.org installer fallback.
+- `-AllowPythonInstall` is retained for older command lines and explicitly keeps the fallback enabled.
 - `-UnblockScripts` explicitly removes PowerShell download-block metadata from this toolkit.
 - `-ContinueOnPrecheckFailure` allows setup to continue past non-critical precheck issues.
 

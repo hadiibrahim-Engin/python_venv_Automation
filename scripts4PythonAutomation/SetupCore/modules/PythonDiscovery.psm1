@@ -768,6 +768,59 @@ function Resolve-PythonInstallerDownload {
     throw $errorMsg
 }
 
+function Add-PythonInstallDirsToPath {
+<#
+.SYNOPSIS
+    Adds Python install directories to this process and the current user's PATH.
+
+.DESCRIPTION
+    The python.org installer can update User PATH, but the current PowerShell
+    process does not inherit that change. This helper makes the freshly
+    installed interpreter discoverable immediately and on the next shell launch.
+#>
+    param([Parameter(Mandatory=$true)][string[]] $Directories)
+
+    $validDirs = @($Directories | Where-Object {
+        $_ -and (Test-Path -LiteralPath $_ -PathType Container)
+    } | Select-Object -Unique)
+
+    if ($validDirs.Count -eq 0) { return }
+
+    foreach ($dir in $validDirs) {
+        if ($env:Path.IndexOf($dir, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $env:Path = "$dir;$env:Path"
+        }
+    }
+
+    try {
+        $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        if (-not $userPath) { $userPath = '' }
+        $userParts = @($userPath -split ';' | Where-Object { $_ })
+        $updated = $false
+
+        foreach ($dir in $validDirs) {
+            $exists = $false
+            foreach ($part in $userParts) {
+                if ($part.Trim().Equals($dir, [StringComparison]::OrdinalIgnoreCase)) {
+                    $exists = $true
+                    break
+                }
+            }
+            if (-not $exists) {
+                $userParts = @($dir) + $userParts
+                $updated = $true
+            }
+        }
+
+        if ($updated) {
+            [System.Environment]::SetEnvironmentVariable('Path', ($userParts -join ';'), 'User')
+            Write-Host '  Updated current user PATH for future shells.' -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host ("  [WARN] Could not update user PATH: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+}
+
 <#
 .SYNOPSIS
     Installs Python from python.org using built-in PowerShell primitives.
@@ -791,12 +844,20 @@ function Install-PythonViaPythonOrg {
     $installerName = $resolvedInstaller.InstallerName
     $downloadUrl = $resolvedInstaller.DownloadUrl
     $installerPath = Join-Path $env:TEMP $installerName
+    $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.Environment]::GetFolderPath('LocalApplicationData') }
+    if (-not $localAppData) {
+        throw 'Cannot resolve LOCALAPPDATA for per-user Python installation.'
+    }
+    $targetDir = Join-Path $localAppData ("Programs\Python\Python{0}{1}" -f $Major, $Minor)
+    $targetExe = Join-Path $targetDir 'python.exe'
+    $targetScriptsDir = Join-Path $targetDir 'Scripts'
 
     Write-Banner "No compatible Python found. Installing Python $Major.$Minor via python.org installer ..." 'WARN'
     Write-Host ("  Version      : {0}" -f $version) -ForegroundColor DarkGray
     Write-Host ("  Installer    : {0}" -f $installerName) -ForegroundColor DarkGray
     Write-Host ("  Download URL: {0}" -f $downloadUrl) -ForegroundColor DarkGray
     Write-Host ("  Download to  : {0}" -f $installerPath) -ForegroundColor DarkGray
+    Write-Host ("  Target dir   : {0}" -f $targetDir) -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  Downloading installer ...' -ForegroundColor Yellow
 
@@ -864,12 +925,16 @@ function Install-PythonViaPythonOrg {
     try {
         Write-Host ''
         Write-Host '  Running silent installer ...' -ForegroundColor Yellow
-        Write-Host '    /quiet InstallAllUsers=0 PrependPath=1 Include_test=0' -ForegroundColor DarkGray
+        Write-Host ("    /quiet InstallAllUsers=0 TargetDir=`"{0}`" PrependPath=1 Include_pip=1 Include_launcher=1 Include_test=0" -f $targetDir) -ForegroundColor DarkGray
 
         $result = Invoke-NativeCommand -Executable $installerPath -Arguments @(
             '/quiet',
             'InstallAllUsers=0',
+            "TargetDir=$targetDir",
             'PrependPath=1',
+            'Include_pip=1',
+            'Include_launcher=1',
+            'InstallLauncherAllUsers=0',
             'Include_test=0'
         ) -Quiet
 
@@ -884,6 +949,13 @@ function Install-PythonViaPythonOrg {
             Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
             Write-Host '  Temporary installer removed.' -ForegroundColor DarkGray
         }
+    }
+
+    return [pscustomobject]@{
+        Version    = $version
+        TargetDir  = $targetDir
+        Exe        = $targetExe
+        ScriptsDir = $targetScriptsDir
     }
 }
 
@@ -954,8 +1026,9 @@ function Install-RequiredPython {
     
     Write-Banner "No compatible Python found locally. Attempting download of Python $requestedVersion ..." 'WARN'
     
+    $installInfo = $null
     try {
-        Install-PythonViaPythonOrg -Major $major -Minor $minor
+        $installInfo = Install-PythonViaPythonOrg -Major $major -Minor $minor
     } catch {
         # Re-throw with clear error header and actionable suggestion
         $baseError = $_.Exception.Message
@@ -983,10 +1056,11 @@ function Install-RequiredPython {
     # Poll for python.exe to appear in well-known install locations.
     # The installer may still be writing files after process return.
     $knownPaths = @(
+        $(if ($installInfo) { $installInfo.Exe } else { $null }),
         (Join-Path $env:LOCALAPPDATA "Programs\Python\Python$major$minor\python.exe"),
         (Join-Path $env:ProgramFiles  "Python$major$minor\python.exe"),
         "${env:ProgramFiles(x86)}\Python$major$minor\python.exe"
-    )
+    ) | Where-Object { $_ } | Select-Object -Unique
 
     # Poll until a known-path python.exe is present AND actually runnable.
     # The silent installer can return exit 0 before all DLLs/stdlib are fully in place,
@@ -1010,9 +1084,7 @@ function Install-RequiredPython {
     if ($foundExe) {
         $resolvedDir = Split-Path $foundExe
         Write-Host ("  Located at: {0}" -f $foundExe) -ForegroundColor DarkGray
-        if ($env:Path -notlike "*$resolvedDir*") {
-            $env:Path = "$resolvedDir;$env:Path"
-        }
+        Add-PythonInstallDirsToPath -Directories @($resolvedDir, (Join-Path $resolvedDir 'Scripts'))
     } else {
         # Fallback: refresh PATH from registry + try py.exe launcher
         $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -1032,8 +1104,8 @@ function Install-RequiredPython {
                 if ($LASTEXITCODE -eq 0 -and $resolved) {
                     $resolvedPath = $resolved.Trim()
                     $resolvedDir  = Split-Path $resolvedPath
-                    if ($resolvedDir -and ($env:Path -notlike "*$resolvedDir*")) {
-                        $env:Path = "$resolvedDir;$env:Path"
+                    if ($resolvedDir) {
+                        Add-PythonInstallDirsToPath -Directories @($resolvedDir, (Join-Path $resolvedDir 'Scripts'))
                         Write-Host ("  Located via py.exe: {0}" -f $resolvedPath) -ForegroundColor DarkGray
                     }
                     $foundExe = $resolvedPath
@@ -1079,8 +1151,8 @@ function Install-RequiredPython {
 .PARAMETER AllowInstall
     When set, allows Install-RequiredPython to download and silently install
     a Python interpreter from python.org if no local candidate satisfies the
-    constraints. Default is off so tests do not silently mutate the dev
-    machine.
+    constraints. The wrapper enables this by default; pass -SkipPythonInstall
+    to disable that fallback.
 
 .PARAMETER NonInteractive
     Suppresses all interactive prompts.  When set, any condition that would
@@ -1216,7 +1288,7 @@ function Resolve-SelectedPython {
 
     if ($pythons.Count -eq 0) {
         if (-not $AllowInstall) {
-            throw ("No compatible Python interpreter found for constraint '{0}'. Install Python manually, pass -PythonExePath, or re-run with -AllowPythonInstall to permit setup to download Python from python.org." -f $RequiresPythonRaw)
+            throw ("No compatible Python interpreter found for constraint '{0}'. Python auto-install is disabled for this run. Install Python manually, pass -PythonExePath, or remove -SkipPythonInstall to permit setup to download Python from python.org." -f $RequiresPythonRaw)
         }
 
         $installedExe = $null

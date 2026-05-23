@@ -91,7 +91,7 @@ function Invoke-SetupStep {
         Write-LogDetail -Key 'location'  -Value $d.Location
         Write-LogDetail -Key 'error_id'  -Value $d.ErrorId
         Write-LogDetail -Key 'command'   -Value $d.Command
-        if ($d.Stack) {
+        if (($env:SETUP_SHOW_STACK -match '^(1|true|yes|on)$') -and $d.Stack) {
             Write-Host '    - stack:' -ForegroundColor DarkGray
             $d.Stack -split "`n" | ForEach-Object { Write-Host ("      {0}" -f $_.Trim()) -ForegroundColor DarkGray }
         }
@@ -185,7 +185,7 @@ function Start-Setup {
 
 .PARAMETER AllowPythonInstall
     When true, setup may download and install Python from python.org if no
-    compatible interpreter is found locally. Defaults to false.
+    compatible interpreter is found locally. Defaults to true.
 
 .OUTPUTS
     PSCustomObject summarizing selected Python, Poetry runtime, and output paths.
@@ -245,7 +245,7 @@ function Start-Setup {
         [string] $PinnedUvVersion = '',
 
         [Parameter()]
-        [bool] $AllowPythonInstall = $false,
+        [bool] $AllowPythonInstall = $true,
 
         [Parameter()]
         # Critical prechecks always stop setup. Set true to also stop on

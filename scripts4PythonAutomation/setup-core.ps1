@@ -17,6 +17,7 @@
 #   .\scripts4PythonAutomation\setup-core.ps1 -PythonExePath "C:\Python311\python.exe"
 #   .\scripts4PythonAutomation\setup-core.ps1 -ForceRecreateVenv            # rebuild .venv
 #   .\scripts4PythonAutomation\setup-core.ps1 -NonInteractive               # CI-safe, no prompts
+#   .\scripts4PythonAutomation\setup-core.ps1 -SkipPythonInstall            # disable auto-install fallback
 #
 # If PowerShell blocks execution because files came from a browser or zip,
 # run once with -UnblockScripts after reviewing the project contents.
@@ -76,9 +77,13 @@ param(
     [string] $PinnedUvVersion = '',
 
     # Automatic Python installation downloads and runs a python.org installer.
-    # Keep this opt-in so setup never installs an interpreter by surprise.
+    # Kept for backward compatibility; auto-install is now enabled by default.
     [Parameter()]
     [switch] $AllowPythonInstall,
+
+    # Explicit opt-out for environments where setup must never install Python.
+    [Parameter()]
+    [switch] $SkipPythonInstall,
 
     # Only use this when files were downloaded from a browser/zip and PowerShell
     # refuses to load them because of Zone.Identifier metadata.
@@ -117,6 +122,8 @@ $resolvedListMode      = [bool]$ListMode
 $resolvedNonInteractive = [bool]$NonInteractive -or [bool]$DryRun -or ($env:CI -match '^(1|true|yes)$')
 $resolvedEnableCodeSigning = Convert-SetupBool -Value $EnableCodeSigning -Name 'EnableCodeSigning'
 $resolvedRequirePmShimSigning = Convert-SetupBool -Value $RequirePmShimSigning -Name 'RequirePmShimSigning'
+$resolvedAllowPythonInstall = if ($PSBoundParameters.ContainsKey('AllowPythonInstall')) { [bool]$AllowPythonInstall } else { $true }
+if ($SkipPythonInstall) { $resolvedAllowPythonInstall = $false }
 
 # VS Code isolation
 # VS Code's PowerShell extension opens every file passed to Import-Module in the
@@ -181,8 +188,8 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     if ($PinnedUvVersion) {
         $forwardArgs += @('-PinnedUvVersion', $PinnedUvVersion)
     }
-    if ($AllowPythonInstall) {
-        $forwardArgs += @('-AllowPythonInstall')
+    if (-not $resolvedAllowPythonInstall) {
+        $forwardArgs += @('-SkipPythonInstall')
     }
     if ($UnblockScripts) {
         $forwardArgs += @('-UnblockScripts')
@@ -248,7 +255,7 @@ try {
         PackageManager     = $PackageManager
         PinnedPoetryVersion = $PinnedPoetryVersion
         PinnedUvVersion    = $PinnedUvVersion
-        AllowPythonInstall = [bool]$AllowPythonInstall
+        AllowPythonInstall = $resolvedAllowPythonInstall
     }
     if ($DryRun)                     { $setupParams.DryRun = $true }
     if ($resolvedPythonExePath)      { $setupParams.PythonExePath = $resolvedPythonExePath }
@@ -257,18 +264,7 @@ try {
     Start-Setup @setupParams | Out-Null
     exit 0
 } catch {
-    if (Get-Command -Name Get-SetupErrorDetails -ErrorAction SilentlyContinue) {
-        $details = Get-SetupErrorDetails -ErrorRecord $_
-        Write-Host ''
-        Write-Host 'Setup failed.' -ForegroundColor Red
-        Write-Host ("Message         : {0}" -f $details.Message) -ForegroundColor Red
-        Write-Host ("Module/Function : {0}" -f $details.Command) -ForegroundColor Red
-        Write-Host ("Location        : {0}" -f $details.Location) -ForegroundColor Red
-        Write-Host ("Category/ErrorId: {0} / {1}" -f $details.Category, $details.ErrorId) -ForegroundColor DarkRed
-        if ($details.Stack) {
-            Write-Host 'Stack trace:' -ForegroundColor DarkRed
-            Write-Host $details.Stack -ForegroundColor DarkGray
-        }
-    }
+    # Start-Setup already prints the step error and final fatal summary.
+    # Keep the wrapper quiet so the same exception is not rendered twice.
     exit 1
 }

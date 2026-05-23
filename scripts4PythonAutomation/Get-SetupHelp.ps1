@@ -222,15 +222,27 @@ ex '.\scripts4PythonAutomation\setup-core.ps1 -NonInteractive -PythonExePath "C:
 
 
 # ---------------------------------------------------------------------------
-h2 '-AllowPythonInstall  [switch]   (default: off)'
+h2 '-AllowPythonInstall  [switch]   (default: on)'
 # ---------------------------------------------------------------------------
 ln
-ln '  Allows setup to download and run a python.org Windows installer if no'
-ln '  compatible interpreter is found locally. The installer signature is verified'
-ln '  before execution and its SHA256 hash is printed.'
+ln '  Python auto-install is enabled by default. This compatibility switch'
+ln '  explicitly keeps the python.org installer fallback enabled when no'
+ln '  compatible interpreter is found locally. The installer signature is'
+ln '  verified before execution and its SHA256 hash is printed.'
 ln
 ln '  Examples:'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -AllowPythonInstall'
+
+
+# ---------------------------------------------------------------------------
+h2 '-SkipPythonInstall  [switch]   (default: off)'
+# ---------------------------------------------------------------------------
+ln
+ln '  Disables the automatic python.org installer fallback. Use this only when'
+ln '  setup must fail instead of installing a missing compatible interpreter.'
+ln
+ln '  Examples:'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -SkipPythonInstall'
 
 
 # ---------------------------------------------------------------------------

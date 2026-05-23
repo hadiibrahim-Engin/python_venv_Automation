@@ -110,8 +110,8 @@ flowchart TD
     F1 -->|Auto| F4[Discover compatible interpreters outside .venv]
     F4 --> F5{Compatible Python found?}
     F5 -->|Yes| F6[Select lowest compatible version]
-    F5 -->|No + AllowPythonInstall| F7[Verified python.org installer path]
-    F5 -->|No + no AllowPythonInstall| F8[Throw actionable install/path message]
+    F5 -->|No + Python install enabled| F7[Verified python.org installer path]
+    F5 -->|No + SkipPythonInstall| F8[Throw actionable install/path message]
     F2 --> G[Configure signing defaults if signing enabled and not DryRun]
     F3 --> G
     F6 --> G
