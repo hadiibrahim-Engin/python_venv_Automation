@@ -145,10 +145,12 @@ $resolvedAllowPythonInstall = if ($PSBoundParameters.ContainsKey('AllowPythonIns
 if ($SkipPythonInstall) { $resolvedAllowPythonInstall = $false }
 
 # Parse -UpgradePackage: accept comma-separated string, split, trim, deduplicate.
-$resolvedUpgradePackages = if ($UpgradePackage) {
-    @($UpgradePackage -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
-} else {
-    @()
+# Two-step assignment avoids a PowerShell 5.1 quirk: 'if/else { @() }' block
+# expressions output nothing to the pipeline, so the variable would receive
+# $null instead of an empty array, causing .Count to throw under StrictMode.
+[string[]] $resolvedUpgradePackages = @()
+if ($UpgradePackage) {
+    $resolvedUpgradePackages = @($UpgradePackage -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
 }
 
 # VS Code isolation
@@ -220,7 +222,7 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     if (-not $resolvedAllowPythonInstall) {
         $forwardArgs += @('-SkipPythonInstall')
     }
-    if ($resolvedUpgradePackages.Count -gt 0) {
+    if ($resolvedUpgradePackages -and $resolvedUpgradePackages.Count -gt 0) {
         # Flatten back to a comma-separated string for the subprocess so it
         # is a single argument that the child's param block can parse again.
         $forwardArgs += @('-UpgradePackage', ($resolvedUpgradePackages -join ','))
