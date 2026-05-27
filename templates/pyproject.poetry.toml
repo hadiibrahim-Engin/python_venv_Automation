@@ -27,6 +27,14 @@ package-mode = false
 python = ">=3.11,<3.13"
 requests = ">=2.31"
 rich = ">=13.0"
+# Azure DevOps / private Git dependency — branch-ref, pinned to latest 'main' commit.
+# Poetry pins the exact commit in poetry.lock on first install.
+# To pull the latest commit from 'main': -UpgradePackage "my-lib"
+#
+# Authentication: store your PAT in Windows Credential Manager, or embed it:
+#   git = "https://<user>:<pat>@dev.azure.com/<org>/<project>/_git/<repo>.git"
+#
+# my-lib = { git = "https://dev.azure.com/<org>/<project>/_git/<repo>.git", branch = "main" }
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.4"

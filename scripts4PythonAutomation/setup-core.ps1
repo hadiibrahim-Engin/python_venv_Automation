@@ -7,11 +7,14 @@
 # Windows-only entry point for the Python environment setup pipeline.
 # Run directly from a PowerShell console (pwsh or powershell.exe):
 #
-#   .\scripts4PythonAutomation\setup-core.ps1                              # auto-detects uv or poetry
-#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv            # force UV
-#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager poetry        # force Poetry
-#   .\scripts4PythonAutomation\setup-core.ps1 -UpdateDependencies           # re-resolve + upgrade all deps
-#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev                   # production deps only
+#   .\scripts4PythonAutomation\setup-core.ps1                                           # auto-detect PM; upgrade ALL deps (default)
+#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv                        # force UV
+#   .\scripts4PythonAutomation\setup-core.ps1 -PackageManager poetry                    # force Poetry
+#   .\scripts4PythonAutomation\setup-core.ps1 -PinExact                                 # install exact lock-file versions (reproducible/CI)
+#   .\scripts4PythonAutomation\setup-core.ps1 -UpgradePackage "my-lib"                  # upgrade one package only (e.g. Azure DevOps Git dep)
+#   .\scripts4PythonAutomation\setup-core.ps1 -UpgradePackage "my-lib,other-lib"        # upgrade multiple packages only
+#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev                               # production deps only
+#   .\scripts4PythonAutomation\setup-core.ps1 -UpdateDependencies                       # (backward-compat alias for default; now a no-op)
 #   .\scripts4PythonAutomation\setup-core.ps1 -DryRun                       # preview pipeline, no changes
 #   .\scripts4PythonAutomation\setup-core.ps1 -ListMode                     # pick Python interactively
 #   .\scripts4PythonAutomation\setup-core.ps1 -PythonExePath "C:\Python311\python.exe"
@@ -27,8 +30,16 @@ param(
     [Parameter()]
     [string] $PythonExePath,
 
+    # Kept for backward compatibility.  The default behaviour is now to upgrade
+    # all dependencies automatically.  Use -PinExact to opt out.
     [Parameter()]
     [switch] $UpdateDependencies,
+
+    # When set, installs the exact versions recorded in the lock file without
+    # attempting to upgrade anything.  Use for reproducible / CI builds where
+    # you need the identical package set on every run.
+    [Parameter()]
+    [switch] $PinExact,
 
     [Parameter()]
     [switch] $ExcludeDev,
@@ -85,6 +96,14 @@ param(
     [Parameter()]
     [switch] $SkipPythonInstall,
 
+    # One or more package names to re-resolve to the latest allowed versions
+    # while leaving every other locked version untouched.
+    # Comma-separated string (e.g. "my-lib,another-lib") or repeated flag.
+    # Use this to refresh an Azure DevOps Git-branch-ref dependency without
+    # upgrading everything.  Ignored when -UpdateDependencies is also set.
+    [Parameter()]
+    [string] $UpgradePackage = '',
+
     # Only use this when files were downloaded from a browser/zip and PowerShell
     # refuses to load them because of Zone.Identifier metadata.
     [Parameter()]
@@ -125,6 +144,13 @@ $resolvedRequirePmShimSigning = Convert-SetupBool -Value $RequirePmShimSigning -
 $resolvedAllowPythonInstall = if ($PSBoundParameters.ContainsKey('AllowPythonInstall')) { [bool]$AllowPythonInstall } else { $true }
 if ($SkipPythonInstall) { $resolvedAllowPythonInstall = $false }
 
+# Parse -UpgradePackage: accept comma-separated string, split, trim, deduplicate.
+$resolvedUpgradePackages = if ($UpgradePackage) {
+    @($UpgradePackage -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+} else {
+    @()
+}
+
 # VS Code isolation
 # VS Code's PowerShell extension opens every file passed to Import-Module in the
 # editor automatically.  Re-launch in a plain powershell.exe subprocess that is
@@ -143,6 +169,9 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     }
     if ($UpdateDependencies) {
         $forwardArgs += @('-UpdateDependencies')
+    }
+    if ($PinExact) {
+        $forwardArgs += @('-PinExact')
     }
     if ($ExcludeDev) {
         $forwardArgs += @('-ExcludeDev')
@@ -190,6 +219,11 @@ if (($env:TERM_PROGRAM -eq 'vscode' -or $env:VSCODE_PID) -and -not $env:SETUP_SU
     }
     if (-not $resolvedAllowPythonInstall) {
         $forwardArgs += @('-SkipPythonInstall')
+    }
+    if ($resolvedUpgradePackages.Count -gt 0) {
+        # Flatten back to a comma-separated string for the subprocess so it
+        # is a single argument that the child's param block can parse again.
+        $forwardArgs += @('-UpgradePackage', ($resolvedUpgradePackages -join ','))
     }
     if ($UnblockScripts) {
         $forwardArgs += @('-UnblockScripts')
@@ -250,12 +284,14 @@ try {
         SignPoetryOnly     = [bool]$SignPoetryOnly
         RequirePmShimSigning = $resolvedRequirePmShimSigning
         UpdateDependencies = [bool]$UpdateDependencies
+        PinExact           = [bool]$PinExact
         IncludeDev         = (-not [bool]$ExcludeDev)
         ListMode           = $resolvedListMode
         PackageManager     = $PackageManager
         PinnedPoetryVersion = $PinnedPoetryVersion
         PinnedUvVersion    = $PinnedUvVersion
         AllowPythonInstall = $resolvedAllowPythonInstall
+        UpgradePackages    = $resolvedUpgradePackages
     }
     if ($DryRun)                     { $setupParams.DryRun = $true }
     if ($resolvedPythonExePath)      { $setupParams.PythonExePath = $resolvedPythonExePath }

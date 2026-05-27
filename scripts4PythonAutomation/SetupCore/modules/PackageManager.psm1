@@ -165,7 +165,7 @@ function Invoke-PmConfigure {
 
     switch ($Ctx.PackageManager) {
         'uv'     { }  # no-op
-        'poetry' { Set-PoetryConfiguration -PoetryPython $Ctx.PoetryPythonPath -ProjectRoot $Ctx.ProjectRoot -Local }
+        'poetry' { Set-PoetryConfiguration -PoetryPython $Ctx.PoetryPythonPath }
     }
 }
 
@@ -379,6 +379,49 @@ function Invoke-PmUpdateDeps {
 }
 
 
+function Invoke-PmUpdateSelectedDeps {
+<#
+.SYNOPSIS
+    Re-resolves only the named packages to the latest versions allowed by
+    pyproject.toml and rewrites the lock file for those entries only.
+
+.DESCRIPTION
+    All other locked versions are left untouched.  This is the correct way to
+    refresh a Git-branch-ref dependency (e.g. an Azure DevOps library tracked
+    on 'main') without upgrading the full environment.
+
+    UV:     'uv sync --upgrade-package <name> ...'
+    Poetry: 'poetry update <name> ...'
+
+.PARAMETER Packages
+    One or more package names to upgrade.
+#>
+    param(
+        [hashtable] $Ctx,
+        [Parameter(Mandatory=$true)][string[]] $Packages,
+        [bool]      $IncludeDev = $true
+    )
+    Assert-SupportedPm -Ctx $Ctx
+
+    switch ($Ctx.PackageManager) {
+        'uv' {
+            Invoke-UvSyncUpgradePackage `
+                -ProjectRoot $Ctx.ProjectRoot `
+                -UvExe       $Ctx.UvInfo.Exe `
+                -Packages    $Packages `
+                -IncludeDev  $IncludeDev
+        }
+        'poetry' {
+            Invoke-PoetryUpdatePackage `
+                -PoetryPython $Ctx.PoetryPythonPath `
+                -ProjectRoot  $Ctx.ProjectRoot `
+                -Packages     $Packages `
+                -IncludeDev   $IncludeDev
+        }
+    }
+}
+
+
 Export-ModuleMember -Function `
     Invoke-PmEnsureRuntime, `
     Get-PmShimPath, `
@@ -388,4 +431,5 @@ Export-ModuleMember -Function `
     Get-PmLockFileName, `
     Invoke-PmLockDeps, `
     Invoke-PmInstallDeps, `
-    Invoke-PmUpdateDeps
+    Invoke-PmUpdateDeps, `
+    Invoke-PmUpdateSelectedDeps

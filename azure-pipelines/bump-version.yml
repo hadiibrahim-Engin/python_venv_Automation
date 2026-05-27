@@ -1,0 +1,126 @@
+# =============================================================================
+# bump-version.yml — Automatic semver bump on every merge to main
+# =============================================================================
+#
+# Triggered automatically on every push to main.
+# Reads commit messages since the last vX.Y.Z git tag and applies
+# conventional-commit rules to bump the version in pyproject.toml:
+#
+#   BREAKING CHANGE / <type>!:  →  major
+#   feat:                        →  minor
+#   fix: / perf: / refactor: /
+#   docs: / chore: / ci: / …     →  patch
+#   (non-CC message / no prefix) →  skip (no commit, no tag)
+#
+# To override the auto-detected bump type for a single run, use the manual
+# trigger ("Run pipeline") and set the forceBump parameter.
+#
+# Prerequisites
+# =============
+# 1. Grant the build service account "Contribute" + "Create tag" permissions
+#    on the repository (Project Settings → Repos → Security).
+# 2. Allow the pipeline to access its own OAuth token:
+#    Pipeline → Edit → … → Triggers → YAML settings
+#    or add `env: GIT_AUTH_TOKEN: $(System.AccessToken)` (already in place).
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      # Avoid re-triggering when the pipeline bumps the version itself.
+      - "azure-pipelines/**"
+      - "pyproject.toml"
+
+# Manual trigger: lets developers force a specific bump type.
+parameters:
+  - name: forceBump
+    displayName: "Force bump type (leave empty for auto-detect)"
+    type: string
+    default: ""
+    values:
+      - ""
+      - patch
+      - minor
+      - major
+
+pr: none  # Version bumping runs only on merged commits, never on open PRs.
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  BUMP_SKIPPED: "false"   # overwritten by bump-version.py when nothing to bump
+  NEW_VERSION:  ""        # overwritten by bump-version.py with the new version string
+
+steps:
+  # --------------------------------------------------------------------------
+  # 1. Checkout with full history so git log / tags work correctly.
+  # --------------------------------------------------------------------------
+  - checkout: self
+    displayName: Checkout (full history)
+    persistCredentials: true   # keeps the OAuth token alive for the push step
+    fetchDepth: 0              # full history needed for git log + tag lookups
+
+  # --------------------------------------------------------------------------
+  # 2. Configure git identity for the bump commit.
+  # --------------------------------------------------------------------------
+  - script: |
+      git config user.email "version-bump-bot@azuredevops.local"
+      git config user.name  "Version Bump Bot"
+    displayName: Configure git identity
+
+  # --------------------------------------------------------------------------
+  # 3. Select Python 3.11+ (tomllib is stdlib from 3.11).
+  # --------------------------------------------------------------------------
+  - task: UsePythonVersion@0
+    displayName: Select Python 3.11
+    inputs:
+      versionSpec: "3.11"
+      addToPath: true
+
+  # --------------------------------------------------------------------------
+  # 4. Run the version-bump script.
+  #    If a manual forceBump parameter was set, pass --force-bump.
+  #    The script sets pipeline variables BUMP_SKIPPED and NEW_VERSION.
+  # --------------------------------------------------------------------------
+  - script: |
+      FORCE_ARG=""
+      if [ -n "${{ parameters.forceBump }}" ]; then
+        FORCE_ARG="--force-bump ${{ parameters.forceBump }}"
+      fi
+      python scripts/bump-version.py $FORCE_ARG
+    displayName: Compute and apply version bump
+    env:
+      # Expose the branch name so the script can use it if needed.
+      BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+
+  # --------------------------------------------------------------------------
+  # 5. Commit the updated pyproject.toml and create a version tag.
+  #    Skipped automatically when BUMP_SKIPPED=true (no bumpable commits).
+  #    [skip ci] prevents this commit from re-triggering the pipeline.
+  # --------------------------------------------------------------------------
+  - script: |
+      git add pyproject.toml
+      git commit -m "chore(release): bump version to $(NEW_VERSION) [skip ci]"
+      git tag "v$(NEW_VERSION)"
+    displayName: Commit version bump and create tag
+    condition: and(succeeded(), ne(variables['BUMP_SKIPPED'], 'true'))
+
+  # --------------------------------------------------------------------------
+  # 6. Push the commit and the new tag back to the repository.
+  #    Uses the pipeline's built-in OAuth token (System.AccessToken).
+  # --------------------------------------------------------------------------
+  - script: |
+      # Configure git to use the OAuth token for HTTPS authentication.
+      git remote set-url origin \
+        "https://$(System.AccessToken)@$(Build.Repository.Uri#https://)"
+      git push origin HEAD:main
+      git push origin "v$(NEW_VERSION)"
+    displayName: Push version bump commit and tag
+    condition: and(succeeded(), ne(variables['BUMP_SKIPPED'], 'true'))
+    env:
+      # Expose the OAuth token explicitly so it is available to git.
+      GIT_AUTH_TOKEN: $(System.AccessToken)

@@ -418,6 +418,37 @@ function Invoke-PoetryUpdate {
     Invoke-PoetryCommand -Executable $PoetryPython -Arguments $poetryArgs -FailureMessage "'poetry update' failed -- see output above."
 }
 
+<#
+.SYNOPSIS
+    Runs `poetry update <package> ...` to re-resolve only the named packages.
+
+.DESCRIPTION
+    Equivalent to 'uv sync --upgrade-package <name>': re-resolves the listed
+    packages (and their transitive deps) to the latest versions allowed by
+    pyproject.toml, rewrites poetry.lock for those entries, and installs the
+    result.  All other locked versions are left untouched.
+
+    Typical use: refreshing a Git-branch-ref dependency from Azure DevOps
+    without upgrading every package in the environment.
+
+.PARAMETER Packages
+    One or more package names to upgrade.
+#>
+function Invoke-PoetryUpdatePackage {
+    param(
+        [Parameter(Mandatory=$true)][string]   $PoetryPython,
+        [Parameter(Mandatory=$true)][string]   $ProjectRoot,
+        [Parameter(Mandatory=$true)][string[]] $Packages,
+        [bool] $IncludeDev = $true
+    )
+    $poetryArgs = @('-m', 'poetry', '-C', $ProjectRoot, 'update') + $Packages
+    if (-not $IncludeDev) { $poetryArgs += @('--without', 'dev') }
+    Invoke-PoetryCommand `
+        -Executable     $PoetryPython `
+        -Arguments      $poetryArgs `
+        -FailureMessage ("'poetry update {0}' failed -- see output above." -f ($Packages -join ', '))
+}
+
 Export-ModuleMember -Function `
     Invoke-PoetryCommand, `
     Test-PoetryAvailable, `
@@ -429,4 +460,5 @@ Export-ModuleMember -Function `
     Use-PoetryPython, `
     Invoke-PoetryLock, `
     Invoke-PoetryInstall, `
-    Invoke-PoetryUpdate
+    Invoke-PoetryUpdate, `
+    Invoke-PoetryUpdatePackage

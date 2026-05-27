@@ -1,8 +1,10 @@
 # =============================================================================
 # Run setup:
-#   .\scripts4PythonAutomation\setup-core.ps1                  # auto-detect (→ uv)
-#   .\scripts4PythonAutomation\setup-core.ps1 -DryRun          # preview only
-#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev      # prod deps only
+#   .\scripts4PythonAutomation\setup-core.ps1                           # upgrade ALL deps (default)
+#   .\scripts4PythonAutomation\setup-core.ps1 -DryRun                  # preview only
+#   .\scripts4PythonAutomation\setup-core.ps1 -ExcludeDev              # prod deps only
+#   .\scripts4PythonAutomation\setup-core.ps1 -PinExact                # lock-file exact versions (CI)
+#   .\scripts4PythonAutomation\setup-core.ps1 -UpgradePackage "my-lib" # upgrade one package only
 # =============================================================================
 
 # PEP 621 project metadata (used by uv)
@@ -17,19 +19,17 @@ dependencies = [
     "rich>=13.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4",
-    "pytest-cov>=4.1",
-    "ruff>=0.4",
-]
-
 # uv configuration
 # [tool.uv] section is the primary signal used by Get-PreferredPackageManager
 # to select uv as the package manager.
 [tool.uv]
 package = false
-dev-dependencies = [
+# dev-dependencies is now declared via PEP 735 [dependency-groups] below.
+# Keeping [tool.uv.dev-dependencies] would produce a deprecation warning in uv ≥0.11.
+
+# PEP 735 dependency groups — replaces [tool.uv.dev-dependencies] (deprecated in uv ≥0.11)
+[dependency-groups]
+dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "ruff>=0.4",

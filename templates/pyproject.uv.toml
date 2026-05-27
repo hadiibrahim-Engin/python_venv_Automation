@@ -25,13 +25,12 @@ readme = "README.md"
 dependencies = [
     "requests>=2.31",
     "rich>=13.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4",
-    "pytest-cov>=4.1",
-    "ruff>=0.4",
+    # To add your self-developed Azure DevOps library as a Git-branch dependency:
+    #   1. Uncomment the line below and replace the placeholder name.
+    #   2. Add the [tool.uv.sources] block further below.
+    #   3. Run setup normally to pin the current HEAD, then use
+    #      -UpgradePackage "my-lib" whenever you want to pull the latest commit.
+    # "my-lib",
 ]
 
 [build-system]
@@ -40,8 +39,27 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = false
-dev-dependencies = [
+# dev-dependencies moved to [dependency-groups] below (uv ≥0.11 deprecates [tool.uv.dev-dependencies]).
+
+# PEP 735 dependency groups
+[dependency-groups]
+dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "ruff>=0.4",
 ]
+
+# ---------------------------------------------------------------------------
+# Azure DevOps / private Git dependencies
+# ---------------------------------------------------------------------------
+# Declare the package name in [project].dependencies above, then point uv at
+# the repository here.  uv pins the exact commit in uv.lock on first install.
+# To pull the latest commit from 'main': -UpgradePackage "my-lib"
+#
+# Authentication on Windows:
+#   • Windows Credential Manager already stores your DevOps PAT → works as-is.
+#   • Or embed credentials in the URL (not recommended for shared repos):
+#     git = "https://<user>:<pat>@dev.azure.com/<org>/<project>/_git/<repo>"
+#
+# [tool.uv.sources]
+# my-lib = { git = "https://dev.azure.com/<org>/<project>/_git/<repo>", branch = "main" }

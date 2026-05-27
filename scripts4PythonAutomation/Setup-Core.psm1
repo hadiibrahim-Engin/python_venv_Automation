@@ -142,13 +142,14 @@ function Start-Setup {
     Signs only poetry.exe under the venv Scripts directory when enabled.
 
 .PARAMETER UpdateDependencies
-    When true, runs 'poetry update' instead of 'poetry install'.
-    'poetry update' re-resolves all dependencies to the latest versions allowed
-    by pyproject.toml constraints and rewrites poetry.lock. This is the
-    Poetry-documented way to intentionally upgrade - equivalent to deleting
-    poetry.lock and reinstalling, but without manual file manipulation.
-    Default is false, which uses 'poetry install' with the existing lock file
-    for reproducible installs.
+    Kept for backward compatibility.  The default behaviour is now to upgrade
+    all dependencies, so passing this flag is a no-op unless PinExact is also
+    set.
+
+.PARAMETER PinExact
+    When true, installs the exact versions recorded in the lock file without
+    attempting to upgrade anything.  Use this for reproducible / CI builds
+    where you need the identical package set every run.
 
 .PARAMETER ListMode
     When true, shows every Python interpreter found on this machine in a
@@ -223,7 +224,14 @@ function Start-Setup {
         [bool] $RequirePmShimSigning = $true,
 
         [Parameter()]
+        # Kept for backward compatibility; upgrading is now the default.
+        # Set PinExact=$true to opt out of upgrading.
         [bool] $UpdateDependencies = $false,
+
+        [Parameter()]
+        # When true, installs exact versions from the lock file without upgrading.
+        # Use for reproducible / CI builds.  Takes priority over UpgradePackages.
+        [bool] $PinExact = $false,
 
         [Parameter()]
         [bool] $ListMode = $false,
@@ -246,6 +254,14 @@ function Start-Setup {
 
         [Parameter()]
         [bool] $AllowPythonInstall = $true,
+
+        [Parameter()]
+        # One or more package names to re-resolve to their latest allowed
+        # versions while leaving every other locked version untouched.
+        # Ideal for Git-branch-ref dependencies (e.g. an Azure DevOps library
+        # tracked on 'main') that should be refreshed on demand without a full
+        # update.  Ignored when UpdateDependencies=$true (full upgrade wins).
+        [string[]] $UpgradePackages = @(),
 
         [Parameter()]
         # Critical prechecks always stop setup. Set true to also stop on
@@ -312,6 +328,8 @@ function Start-Setup {
             PinnedPoetryVersion  = $PinnedPoetryVersion
             PinnedUvVersion      = $PinnedUvVersion
             AllowPythonInstall   = $AllowPythonInstall
+            UpgradePackages      = $UpgradePackages     # string[]; selective per-package upgrade
+            PinExact             = $PinExact            # bool; install exact lock-file versions
             VenvBackupPath       = $null                # set by New-VenvBackup before step 5b
             PrechecksWouldAbort  = $false
         }
@@ -485,35 +503,57 @@ function Start-Setup {
             Copy-PythonDllToVenv -DllSourceDir $ctx.SelectedPython.Directory -VenvDir $ctx.VenvDir -DllName $ctx.SelectedPython.DllName
         } | Out-Null
 
-        # 8. Sync lock file with pyproject.toml without upgrading pinned versions.
-        #    UV:     'uv lock'                 - adds/removes per pyproject.toml changes.
-        #    Poetry: 'poetry lock --no-update' - same intent; Poetry's documented flag.
-        #    Skipped when UpdateDependencies=true (the update step regenerates the lock).
-        if (-not $ctx.UpdateDependencies) {
-            Invoke-SetupStep -Step '8/13' -Module 'PM' -Message ("Sync lock file with pyproject.toml ({0} lock)" -f $ctx.PackageManager) -Mandatory $true -Action {
+        # 8. Sync lock file with pyproject.toml.
+        #    PinExact mode: 'uv lock' / 'poetry lock' to add/remove deps without upgrade.
+        #    Upgrade modes: skipped — the upgrade step (9) rewrites the lock itself.
+        $step8Mode = if ($ctx.PinExact) { 'pin' } `
+                     elseif ($ctx.UpgradePackages -and $ctx.UpgradePackages.Count -gt 0) { 'selective' } `
+                     else { 'upgrade' }
+
+        if ($step8Mode -eq 'pin') {
+            Invoke-SetupStep -Step '8/13' -Module 'PM' -Message ("Sync lock file with pyproject.toml ({0} lock, pin-exact mode)" -f $ctx.PackageManager) -Mandatory $true -Action {
                 $lockFile = Join-Path $ctx.ProjectRoot (Get-PmLockFileName -Ctx $ctx)
                 Write-LogDetail -Key 'lock_file'    -Value $lockFile
                 Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
                 Invoke-PmLockDeps -Ctx $ctx
             } | Out-Null
         } else {
+            # upgrade-all or selective: lock file will be rewritten by the upgrade command in step 9.
             $lockFile = Join-Path $ctx.ProjectRoot (Get-PmLockFileName -Ctx $ctx)
-            Write-LogDetail -Key '8/13 lock' -Value ("present={0}; will be replaced by {1} update" -f (Test-Path $lockFile -PathType Leaf), $ctx.PackageManager)
+            Write-LogDetail -Key '8/13 lock' -Value ("present={0}; step 9 will re-resolve ({1})" -f (Test-Path $lockFile -PathType Leaf), $step8Mode)
         }
 
-        # 9. Install exact versions from lock file (default) or re-resolve (UpdateDependencies)
+        # 9. Dependency install / upgrade.
+        #    Priority (highest wins):
+        #      PinExact=true            → install exact versions from lock file
+        #      UpgradePackages non-empty → upgrade only the listed packages
+        #      (default)                → upgrade ALL packages within pyproject.toml constraints
         if (-not $ctx.SkipPoetryInstall) {
-            if ($ctx.UpdateDependencies) {
-                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Re-resolve all dependencies ({0} update)" -f $ctx.PackageManager) -Mandatory $true -Action {
+            if ($ctx.PinExact) {
+                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Install exact versions from lock file ({0} install)" -f $ctx.PackageManager) -Mandatory $true -Action {
                     Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
                     Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
-                    Invoke-PmUpdateDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
+                    Write-LogDetail -Key 'mode'         -Value 'pin-exact'
+                    Invoke-PmInstallDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
+                } | Out-Null
+            } elseif ($ctx.UpgradePackages -and $ctx.UpgradePackages.Count -gt 0) {
+                $pkgList = $ctx.UpgradePackages -join ', '
+                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Upgrade selected packages ({0} upgrade-package: {1})" -f $ctx.PackageManager, $pkgList) -Mandatory $true -Action {
+                    Write-LogDetail -Key 'project_root'     -Value $ctx.ProjectRoot
+                    Write-LogDetail -Key 'include_dev'      -Value $ctx.IncludeDev
+                    Write-LogDetail -Key 'upgrade_packages' -Value ($ctx.UpgradePackages -join ', ')
+                    Write-LogDetail -Key 'mode'             -Value 'selective-upgrade'
+                    Invoke-PmUpdateSelectedDeps -Ctx $ctx -Packages $ctx.UpgradePackages -IncludeDev $ctx.IncludeDev
                 } | Out-Null
             } else {
-                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Install from lock file ({0} install)" -f $ctx.PackageManager) -Mandatory $true -Action {
+                # DEFAULT: upgrade all packages within the version constraints declared in
+                # pyproject.toml.  Existing .venv is reused; only outdated packages are
+                # re-downloaded.  Equivalent to running 'uv sync --upgrade'.
+                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Upgrade all dependencies to latest ({0} update)" -f $ctx.PackageManager) -Mandatory $true -Action {
                     Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
                     Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
-                    Invoke-PmInstallDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
+                    Write-LogDetail -Key 'mode'         -Value 'upgrade-all (default)'
+                    Invoke-PmUpdateDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
                 } | Out-Null
             }
         }

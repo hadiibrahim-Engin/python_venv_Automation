@@ -178,8 +178,14 @@ function Invoke-UvVenv {
 function Invoke-UvSync {
 <#
 .SYNOPSIS
-    Runs 'uv sync' to install exact versions from uv.lock into .venv.
+    Runs 'uv sync' to install exact versions from uv.lock into .venv (PinExact mode).
     Equivalent to 'poetry install'.  Creates uv.lock if it does not exist.
+
+.DESCRIPTION
+    With [dependency-groups] (PEP 735), uv includes the 'dev' group by default.
+    --all-extras is also passed when IncludeDev=$true so any
+    [project.optional-dependencies] extras are installed.
+    Pass IncludeDev=$false to add --no-dev and skip the dev group.
 #>
     param(
         [Parameter(Mandatory=$true)][string] $ProjectRoot,
@@ -187,7 +193,12 @@ function Invoke-UvSync {
         [bool] $IncludeDev = $true
     )
     $uvArgs = @('sync')
-    if ($IncludeDev) { $uvArgs += '--all-extras' }
+    if ($IncludeDev) {
+        $uvArgs += '--all-extras'   # [project.optional-dependencies] extras
+        # [dependency-groups.dev] is included by uv by default — no extra flag needed.
+    } else {
+        $uvArgs += '--no-dev'       # excludes the dev dependency group
+    }
 
     Invoke-NativeCommand `
         -Executable       $UvExe `
@@ -202,7 +213,7 @@ function Invoke-UvSyncUpgrade {
 .SYNOPSIS
     Runs 'uv sync --upgrade' to re-resolve all dependencies to the latest
     versions allowed by pyproject.toml and rewrite uv.lock.
-    Equivalent to 'poetry update'.
+    Equivalent to 'poetry update'.  This is the DEFAULT setup behaviour.
 #>
     param(
         [Parameter(Mandatory=$true)][string] $ProjectRoot,
@@ -210,7 +221,11 @@ function Invoke-UvSyncUpgrade {
         [bool] $IncludeDev = $true
     )
     $uvArgs = @('sync', '--upgrade')
-    if ($IncludeDev) { $uvArgs += '--all-extras' }
+    if ($IncludeDev) {
+        $uvArgs += '--all-extras'
+    } else {
+        $uvArgs += '--no-dev'
+    }
 
     Invoke-NativeCommand `
         -Executable       $UvExe `
@@ -218,6 +233,49 @@ function Invoke-UvSyncUpgrade {
         -WorkingDirectory $ProjectRoot `
         -ThrowOnError `
         -FailureMessage   "'uv sync --upgrade' failed -- see output above." | Out-Null
+}
+
+function Invoke-UvSyncUpgradePackage {
+<#
+.SYNOPSIS
+    Runs 'uv sync --upgrade-package <name> ...' to re-resolve only the named
+    packages (and their transitive dependencies) to the latest versions allowed
+    by pyproject.toml, then rewrites uv.lock for those entries only.
+
+.DESCRIPTION
+    All other locked versions are left untouched.  This is the correct way to
+    refresh a Git-branch-ref dependency (e.g. an Azure DevOps library pinned to
+    'main') without upgrading every package in the environment.
+
+    Typical usage:
+        Invoke-UvSyncUpgradePackage -ProjectRoot $root -UvExe $uv -Packages @('my-lib')
+
+.PARAMETER Packages
+    One or more package names to upgrade.  Each name is passed as a separate
+    '--upgrade-package <name>' argument.
+#>
+    param(
+        [Parameter(Mandatory=$true)][string]   $ProjectRoot,
+        [Parameter(Mandatory=$true)][string]   $UvExe,
+        [Parameter(Mandatory=$true)][string[]] $Packages,
+        [bool] $IncludeDev = $true
+    )
+    $uvArgs = @('sync')
+    foreach ($pkg in $Packages) {
+        $uvArgs += @('--upgrade-package', $pkg)
+    }
+    if ($IncludeDev) {
+        $uvArgs += '--all-extras'
+    } else {
+        $uvArgs += '--no-dev'
+    }
+
+    Invoke-NativeCommand `
+        -Executable       $UvExe `
+        -Arguments        $uvArgs `
+        -WorkingDirectory $ProjectRoot `
+        -ThrowOnError `
+        -FailureMessage   "'uv sync --upgrade-package' failed -- see output above." | Out-Null
 }
 
 function Invoke-UvLock {
@@ -248,4 +306,5 @@ Export-ModuleMember -Function `
     Invoke-UvVenv, `
     Invoke-UvSync, `
     Invoke-UvSyncUpgrade, `
+    Invoke-UvSyncUpgradePackage, `
     Invoke-UvLock
