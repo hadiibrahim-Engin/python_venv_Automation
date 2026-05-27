@@ -27,10 +27,13 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 #>
 function Invoke-PoetryCommand {
     param(
-        [Parameter(Mandatory=$true)][string] $Executable,
+        [Parameter(Mandatory=$true)][string]   $Executable,
         [Parameter(Mandatory=$true)][string[]] $Arguments,
-        [Parameter(Mandatory=$true)][string] $FailureMessage,
-        [switch] $Quiet
+        [Parameter(Mandatory=$true)][string]   $FailureMessage,
+        [switch] $Quiet,
+        # When set, output streams live to the console (no capture).
+        # Use for long-running operations: poetry install, update, lock, env use.
+        [switch] $PassThrough
     )
     $normalizedArgs = @($Arguments)
 
@@ -46,7 +49,7 @@ function Invoke-PoetryCommand {
         }
     }
 
-    Invoke-NativeCommand -Executable $Executable -Arguments $normalizedArgs -Quiet:$Quiet -ThrowOnError -FailureMessage $FailureMessage | Out-Null
+    Invoke-NativeCommand -Executable $Executable -Arguments $normalizedArgs -Quiet:$Quiet -PassThrough:$PassThrough -ThrowOnError -FailureMessage $FailureMessage | Out-Null
 }
 
 <#
@@ -342,7 +345,7 @@ function Use-PoetryPython {
     # which handles quoting correctly. Adding literal quotes would inject them
     # into the argument string and make Poetry see `"C:\path\python.exe"` with
     # embedded quote characters, breaking path existence checks.
-    Invoke-PoetryCommand -Executable $PoetryPython -Arguments @('-m', 'poetry', '-C', $ProjectRoot, 'env', 'use', $PythonExe) -FailureMessage ("Poetry 'env use' failed for: {0}. Project root: {1}" -f $PythonExe, $ProjectRoot)
+    Invoke-PoetryCommand -Executable $PoetryPython -Arguments @('-m', 'poetry', '-C', $ProjectRoot, 'env', 'use', $PythonExe) -PassThrough -FailureMessage ("Poetry 'env use' failed for: {0}. Project root: {1}" -f $PythonExe, $ProjectRoot)
 }
 
 <#
@@ -370,6 +373,7 @@ function Invoke-PoetryLock {
     Invoke-PoetryCommand `
         -Executable     $PoetryPython `
         -Arguments      @('-m', 'poetry', '-C', $ProjectRoot, 'lock') `
+        -PassThrough `
         -FailureMessage "'poetry lock' failed -- see output above."
 }
 
@@ -390,7 +394,7 @@ function Invoke-PoetryInstall {
     )
     $poetryArgs = @('-m', 'poetry', '-C', $ProjectRoot, 'install')
     if (-not $IncludeDev) { $poetryArgs += @('--without', 'dev') }
-    Invoke-PoetryCommand -Executable $PoetryPython -Arguments $poetryArgs -FailureMessage "'poetry install' failed -- see output above."
+    Invoke-PoetryCommand -Executable $PoetryPython -Arguments $poetryArgs -PassThrough -FailureMessage "'poetry install' failed -- see output above."
 }
 
 <#
@@ -415,7 +419,7 @@ function Invoke-PoetryUpdate {
     )
     $poetryArgs = @('-m', 'poetry', '-C', $ProjectRoot, 'update')
     if (-not $IncludeDev) { $poetryArgs += @('--without', 'dev') }
-    Invoke-PoetryCommand -Executable $PoetryPython -Arguments $poetryArgs -FailureMessage "'poetry update' failed -- see output above."
+    Invoke-PoetryCommand -Executable $PoetryPython -Arguments $poetryArgs -PassThrough -FailureMessage "'poetry update' failed -- see output above."
 }
 
 <#
@@ -446,6 +450,7 @@ function Invoke-PoetryUpdatePackage {
     Invoke-PoetryCommand `
         -Executable     $PoetryPython `
         -Arguments      $poetryArgs `
+        -PassThrough `
         -FailureMessage ("'poetry update {0}' failed -- see output above." -f ($Packages -join ', '))
 }
 

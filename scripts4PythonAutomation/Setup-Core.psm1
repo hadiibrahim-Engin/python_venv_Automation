@@ -19,7 +19,6 @@ if (-not (Test-Path (Join-Path $modulesDir 'Compat.psm1'))) {
     Write-Host "Modules directory missing Compat.psm1: $modulesDir" -ForegroundColor Red
     throw "Cannot continue without modules directory."
 }
-Write-Host ("Using modules directory: {0}" -f $modulesDir) -ForegroundColor DarkGray
 
 # Always call the real Import-Module cmdlet, import by full path.
 # Order matters: leaves first (UI, Versioning, NativeCommand), then modules
@@ -559,19 +558,19 @@ function Start-Setup {
         }
 
         # 10. Write .pth file - resolve site-packages path dynamically via the venv python
-        if ($script:setupDryRun) {
-            $ctx.SitePackagesDir = '<would resolve from .venv python>'
-        } else {
-            $venvPythonExe = Get-VenvPythonExe -VenvDir $ctx.VenvDir
-            try {
-                $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
-                $ctx.SitePackagesDir = $spResult.Trim()
-            } catch {
-                # Windows venv fallback if python call fails.
-                $ctx.SitePackagesDir = Join-Path $ctx.VenvDir 'Lib\site-packages'
-            }
-        }
         Invoke-SetupStep -Step '10/13' -Module 'Venv' -Message 'Write project .pth into site-packages' -Mandatory $true -Action {
+            if ($script:setupDryRun) {
+                $ctx.SitePackagesDir = '<would resolve from .venv python>'
+            } else {
+                $venvPythonExe = Get-VenvPythonExe -VenvDir $ctx.VenvDir
+                try {
+                    $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
+                    $ctx.SitePackagesDir = $spResult.Trim()
+                } catch {
+                    # Windows venv fallback if python call fails.
+                    $ctx.SitePackagesDir = Join-Path $ctx.VenvDir 'Lib\site-packages'
+                }
+            }
             Write-LogDetail -Key 'site_packages' -Value $ctx.SitePackagesDir
             Write-ProjectPth -ProjectRoot $ctx.ProjectRoot -SitePackagesDir $ctx.SitePackagesDir
         } | Out-Null

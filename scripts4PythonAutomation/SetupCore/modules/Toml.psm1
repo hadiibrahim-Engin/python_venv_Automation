@@ -13,7 +13,68 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 <#
 .SYNOPSIS
     pyproject.toml parsing helpers used during setup.
+
+.DESCRIPTION
+    Reads and caches pyproject.toml once per module lifetime so that multiple
+    callers in the same setup run never read the same file more than once.
+    The cache is keyed by resolved file path.
 #>
+
+# ---------------------------------------------------------------------------
+# Module-level read cache — keyed by resolved file path.
+# Avoids repeated disk reads when Get-ProjectMetadata, Get-PmDetectionReport,
+# and Get-PreferredPackageManager are all called in the same setup run.
+# ---------------------------------------------------------------------------
+$script:_tomlCache = @{}
+
+function Get-TomlContent {
+<#
+.SYNOPSIS
+    Returns the raw text of pyproject.toml, reading from disk only once per
+    path per module lifetime.
+#>
+    param([Parameter(Mandatory=$true)][string] $TomlPath)
+
+    $key = $TomlPath.ToLowerInvariant()
+    if ($script:_tomlCache.ContainsKey($key)) {
+        return $script:_tomlCache[$key]
+    }
+
+    $raw = Get-Content $TomlPath -Raw -ErrorAction SilentlyContinue
+    $script:_tomlCache[$key] = $raw
+    return $raw
+}
+
+function Clear-TomlCache {
+<#
+.SYNOPSIS
+    Clears the cached TOML content. Call between test runs.
+#>
+    $script:_tomlCache = @{}
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+function Get-TomlClean {
+<#
+.SYNOPSIS
+    Strips full-line TOML comments from raw TOML text.
+    Uses a single regex replace (faster than split/filter/join).
+#>
+    param([Parameter(Mandatory=$true)][string] $Raw)
+    # Remove lines that are entirely comments (optional leading whitespace + #).
+    # The (?m) flag makes ^ match start-of-line.
+    # \r? handles Windows CRLF line endings.
+    return ($Raw -replace '(?m)^\s*#[^\r\n]*\r?\n?', '')
+}
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 <#
 .SYNOPSIS
@@ -31,7 +92,10 @@ function Get-ProjectMetadata {
         Exit-WithError -Message "pyproject.toml not found at: $tomlPath"
     }
 
-    $content = Get-Content $tomlPath -Raw
+    $content = Get-TomlContent -TomlPath $tomlPath
+    if (-not $content) {
+        Exit-WithError -Message "pyproject.toml is empty or unreadable: $tomlPath"
+    }
 
     # Support both hatchling (requires-python) and Poetry-native (python) keys.
     # TOML allows both "double" and 'single' quoted strings.
@@ -54,26 +118,22 @@ function Get-ProjectMetadata {
     }
 }
 
+
 <#
 .SYNOPSIS
-    Infers the preferred package manager for a project directory.
+    Runs the full package-manager detection and returns every signal found.
 
 .DESCRIPTION
     Detection priority (first match wins):
 
       1. Build-system backend  - most definitive authorship signal.
            build-backend = "poetry.core.masonry.api"  → poetry
-           (uv / hatchling / setuptools have no single canonical backend
-            so they are handled by lower priorities)
 
-      2. Explicit tool sections in pyproject.toml - clear tooling choice.
+      2. Explicit tool sections in pyproject.toml.
            [tool.uv] or [tool.uv.*]  present, no [tool.poetry.*] → uv
            [tool.poetry] or [tool.poetry.*] present, no [tool.uv*] → poetry
 
       3. PEP 621 [project] table without Poetry sections → uv.
-           Poetry stores all its metadata under [tool.poetry]; a bare
-           [project] section (used by uv, hatchling, setuptools) with no
-           [tool.poetry.*] means this is a non-Poetry project.
 
       4. Lock files - what was most recently USED.
            uv.lock only    → uv
@@ -81,87 +141,6 @@ function Get-ProjectMetadata {
            Both present    → the more recently written file wins.
 
       5. No signal → poetry (conservative default).
-
-.PARAMETER ProjectRoot
-    Project directory to inspect.
-
-.OUTPUTS
-    String: 'uv' or 'poetry'.
-#>
-function Get-PreferredPackageManager {
-    param([Parameter(Mandatory=$true)][string] $ProjectRoot)
-
-    $poetryLock = Join-Path $ProjectRoot 'poetry.lock'
-    $uvLock     = Join-Path $ProjectRoot 'uv.lock'
-    $tomlPath   = Join-Path $ProjectRoot 'pyproject.toml'
-
-    $hasUvSection      = $false
-    $hasPoetrySection  = $false
-    $hasProjectSection = $false
-    $hasPoetryBackend  = $false
-
-    if (Test-Path $tomlPath -PathType Leaf) {
-        $raw = Get-Content $tomlPath -Raw -ErrorAction SilentlyContinue
-        if ($raw) {
-            # Strip full-line TOML comments to avoid false matches on lines like:
-            #   # [tool.uv.sources]  or  # build-backend = "poetry.core.masonry.api"
-            $clean = ($raw -split "`r?`n" |
-                Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-
-            # [build-system] backend - strongest authorship signal
-            $hasPoetryBackend  = $clean -match 'poetry\.core\.masonry\.api'
-
-            # Explicit tool configuration sections
-            $hasUvSection      = $clean -match '(?m)^\s*\[tool\.uv[\].]'
-            $hasPoetrySection  = $clean -match '(?m)^\s*\[tool\.poetry[\].]'
-
-            # PEP 621 project table ([project] without trailing dot -
-            # avoids matching [project.optional-dependencies] etc.)
-            $hasProjectSection = $clean -match '(?m)^\s*\[project\]'
-        }
-    }
-
-    # Priority 1: Build-system backend
-    # poetry.core.masonry.api is an unambiguous Poetry marker.
-    # No equivalent exists for uv; skip to priority 2 when backend is absent.
-    if ($hasPoetryBackend) { return 'poetry' }
-
-    # Priority 2: Explicit tool sections
-    if ($hasUvSection     -and -not $hasPoetrySection) { return 'uv'     }
-    if ($hasPoetrySection -and -not $hasUvSection)     { return 'poetry' }
-    # Both sections present (dual-mode project): fall through to lock files.
-
-    # Priority 3: PEP 621 [project] table
-    # Poetry stores all metadata under [tool.poetry]; any project using [project]
-    # without [tool.poetry.*] is a PEP 621 / uv-style project.
-    if ($hasProjectSection -and -not $hasPoetrySection) { return 'uv' }
-
-    # Priority 4: Lock files
-    $hasPoetryLock = Test-Path $poetryLock -PathType Leaf
-    $hasUvLock     = Test-Path $uvLock     -PathType Leaf
-
-    if ($hasPoetryLock -and -not $hasUvLock) { return 'poetry' }
-    if ($hasUvLock -and -not $hasPoetryLock) { return 'uv'     }
-
-    if ($hasPoetryLock -and $hasUvLock) {
-        $uvTime     = (Get-Item -LiteralPath $uvLock).LastWriteTimeUtc
-        $poetryTime = (Get-Item -LiteralPath $poetryLock).LastWriteTimeUtc
-        return $(if ($uvTime -ge $poetryTime) { 'uv' } else { 'poetry' })
-    }
-
-    # Priority 5: Default
-    return 'poetry'
-}
-
-<#
-.SYNOPSIS
-    Runs the full package-manager detection and returns every signal found.
-
-.DESCRIPTION
-    Identical detection logic to Get-PreferredPackageManager, but instead of
-    returning only the winner it returns a structured report that callers can
-    log for diagnostics.  The orchestrator uses this so the PM step can show
-    exactly which evidence triggered the decision.
 
 .OUTPUTS
     PSCustomObject with:
@@ -189,10 +168,11 @@ function Get-PmDetectionReport {
     $hasPoetryLock     = Test-Path $poetryLock -PathType Leaf
 
     if (Test-Path $tomlPath -PathType Leaf) {
-        $raw = Get-Content $tomlPath -Raw -ErrorAction SilentlyContinue
+        $raw = Get-TomlContent -TomlPath $tomlPath
         if ($raw) {
-            $clean = ($raw -split "`r?`n" |
-                Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            # Strip full-line TOML comments to avoid false matches on lines like:
+            #   # [tool.uv.sources]  or  # build-backend = "poetry.core.masonry.api"
+            $clean = Get-TomlClean -Raw $raw
 
             $hasPoetryBackend  = $clean -match 'poetry\.core\.masonry\.api'
             $hasUvSection      = $clean -match '(?m)^\s*\[tool\.uv[\].]'
@@ -201,7 +181,7 @@ function Get-PmDetectionReport {
         }
     }
 
-    # Mirror the priority chain in Get-PreferredPackageManager exactly.
+    # Mirror the detection priority chain.
     $pm     = 'poetry'
     $reason = 'no signal found - using default'
 
@@ -215,7 +195,6 @@ function Get-PmDetectionReport {
         $pm     = 'poetry'
         $reason = '[tool.poetry] section present, no [tool.uv]'
     } elseif ($hasUvSection -and $hasPoetrySection) {
-        # Dual-mode: fall through to lock files (reason set below)
         $reason = '[tool.uv] and [tool.poetry] both present - checking lock files'
     } elseif ($hasProjectSection -and -not $hasPoetrySection) {
         $pm     = 'uv'
@@ -255,4 +234,25 @@ function Get-PmDetectionReport {
     }
 }
 
-Export-ModuleMember -Function Get-ProjectMetadata, Get-PreferredPackageManager, Get-PmDetectionReport
+
+<#
+.SYNOPSIS
+    Infers the preferred package manager for a project directory.
+
+.DESCRIPTION
+    Thin wrapper around Get-PmDetectionReport that returns only the winning
+    package manager string.  Exists for backward compatibility and simple
+    callers that do not need the full detection report.
+#>
+function Get-PreferredPackageManager {
+    param([Parameter(Mandatory=$true)][string] $ProjectRoot)
+    return (Get-PmDetectionReport -ProjectRoot $ProjectRoot).PackageManager
+}
+
+
+Export-ModuleMember -Function `
+    Get-ProjectMetadata, `
+    Get-PreferredPackageManager, `
+    Get-PmDetectionReport, `
+    Get-TomlContent, `
+    Clear-TomlCache

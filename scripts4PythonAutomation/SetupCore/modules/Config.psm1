@@ -32,6 +32,13 @@ $ErrorActionPreference = 'Stop'
 
 $script:ConfigFileName = '.setup-config.json'
 
+# Module-level read cache.
+# Read-SetupConfig is called twice per setup run (once in Resolve-PackageManager,
+# once in Merge-SetupConfig — both inside the same DETECT step).  The cache
+# ensures the file is only read from disk once.
+# Call Clear-SetupConfigCache between test runs or after Write-SetupConfig.
+$script:_configCache = @{}
+
 # ---------------------------------------------------------------------------
 # Path helper
 # ---------------------------------------------------------------------------
@@ -42,6 +49,11 @@ function Get-SetupConfigPath {
     Join-Path $ProjectRoot $script:ConfigFileName
 }
 
+function Clear-SetupConfigCache {
+<#
+.SYNOPSIS Clears the in-memory read cache. Call between test runs.#>
+    $script:_configCache = @{}
+}
 
 # ---------------------------------------------------------------------------
 # Read
@@ -51,17 +63,29 @@ function Read-SetupConfig {
 .SYNOPSIS
     Reads .setup-config.json and returns its contents as a PSCustomObject,
     or $null when the file does not exist or is malformed.
+    Result is cached in memory so the file is only read once per module lifetime.
 #>
     param([Parameter(Mandatory=$true)][string] $ProjectRoot)
 
+    $key = $ProjectRoot.ToLowerInvariant()
+    if ($script:_configCache.ContainsKey($key)) {
+        return $script:_configCache[$key]
+    }
+
     $path = Get-SetupConfigPath -ProjectRoot $ProjectRoot
-    if (-not (Test-Path $path -PathType Leaf)) { return $null }
+    if (-not (Test-Path $path -PathType Leaf)) {
+        $script:_configCache[$key] = $null
+        return $null
+    }
 
     try {
-        $raw = Get-Content $path -Raw -Encoding UTF8 -ErrorAction Stop
-        return ($raw | ConvertFrom-Json -ErrorAction Stop)
+        $raw    = Get-Content $path -Raw -Encoding UTF8 -ErrorAction Stop
+        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+        $script:_configCache[$key] = $parsed
+        return $parsed
     } catch {
         Write-Host ("[WARN] [Config] Could not read {0}: {1}" -f $script:ConfigFileName, $_.Exception.Message) -ForegroundColor Yellow
+        $script:_configCache[$key] = $null
         return $null
     }
 }
@@ -116,6 +140,8 @@ function Write-SetupConfig {
 
     try {
         $config | ConvertTo-Json -Depth 3 | Set-Content $path -Encoding UTF8 -ErrorAction Stop
+        # Invalidate the read cache so the next Read-SetupConfig call sees the new content.
+        $script:_configCache.Remove($ProjectRoot.ToLowerInvariant())
     } catch {
         Write-Host ("[WARN] [Config] Could not write {0}: {1}" -f $script:ConfigFileName, $_.Exception.Message) -ForegroundColor Yellow
     }
@@ -168,4 +194,4 @@ function Merge-SetupConfig {
 }
 
 
-Export-ModuleMember -Function Get-SetupConfigPath, Read-SetupConfig, Write-SetupConfig, Merge-SetupConfig
+Export-ModuleMember -Function Get-SetupConfigPath, Read-SetupConfig, Write-SetupConfig, Merge-SetupConfig, Clear-SetupConfigCache

@@ -169,8 +169,9 @@ function Invoke-UvVenv {
         [Parameter(Mandatory=$true)][string] $UvExe
     )
     Invoke-NativeCommand `
-        -Executable $UvExe `
-        -Arguments  @('venv', '--python', $PythonExe, $VenvDir) `
+        -Executable  $UvExe `
+        -Arguments   @('venv', '--python', $PythonExe, $VenvDir) `
+        -PassThrough `
         -ThrowOnError `
         -FailureMessage "'uv venv' failed to create virtual environment." | Out-Null
 }
@@ -204,6 +205,7 @@ function Invoke-UvSync {
         -Executable       $UvExe `
         -Arguments        $uvArgs `
         -WorkingDirectory $ProjectRoot `
+        -PassThrough `
         -ThrowOnError `
         -FailureMessage   "'uv sync' failed -- see output above." | Out-Null
 }
@@ -231,6 +233,7 @@ function Invoke-UvSyncUpgrade {
         -Executable       $UvExe `
         -Arguments        $uvArgs `
         -WorkingDirectory $ProjectRoot `
+        -PassThrough `
         -ThrowOnError `
         -FailureMessage   "'uv sync --upgrade' failed -- see output above." | Out-Null
 }
@@ -274,6 +277,7 @@ function Invoke-UvSyncUpgradePackage {
         -Executable       $UvExe `
         -Arguments        $uvArgs `
         -WorkingDirectory $ProjectRoot `
+        -PassThrough `
         -ThrowOnError `
         -FailureMessage   "'uv sync --upgrade-package' failed -- see output above." | Out-Null
 }
@@ -294,6 +298,7 @@ function Invoke-UvLock {
         -Executable       $UvExe `
         -Arguments        @('lock') `
         -WorkingDirectory $ProjectRoot `
+        -PassThrough `
         -ThrowOnError `
         -FailureMessage   "'uv lock' failed -- see output above." | Out-Null
 }
