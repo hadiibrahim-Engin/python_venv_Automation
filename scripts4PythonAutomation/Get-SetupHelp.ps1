@@ -44,7 +44,7 @@ h1 'pyfactory / pythonAutomation — Setup Reference'
 ln
 ln 'Windows-only automation for Python 3.11 virtual-environment creation and dependency installation.'
 ln 'Supports two package managers (Poetry, UV — auto-detected from pyproject.toml),'
-ln 'required DigiCert code signing, DryRun mode, rollback on failure, and three Python-selection modes.'
+ln 'required DigiCert code signing, DryRun mode, venv-only update mode, rollback on failure, and three Python-selection modes.'
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +117,28 @@ ex '.\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv      # override
 
 
 # ---------------------------------------------------------------------------
+h2 '-Mode  <setup | update-venv | venv-update | refresh-venv>   (default: setup)'
+# ---------------------------------------------------------------------------
+ln
+ln '  Selects the workflow to run.'
+ln
+hl '  setup'
+ln '    Runs the full setup pipeline: Python discovery/install, package-manager'
+ln '    runtime checks, .venv preparation, dependency install, wiring, and signing.'
+ln
+hl '  update-venv  (aliases: venv-update, refresh-venv)'
+ln '    Refreshes the existing .venv only. It does not install Python, install'
+ln '    Poetry/uv, recreate .venv, write VS Code settings, copy DLLs, or sign exes.'
+ln '    UV projects run uv sync; Poetry projects run poetry install;'
+ln '    requirements.txt projects run pip install -r requirements.txt.'
+ln
+ln '  Examples:'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv -UpdateDependencies'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv -UpgradePackage "my-lib"'
+
+
+# ---------------------------------------------------------------------------
 h2 '-PythonExePath  <path>'
 # ---------------------------------------------------------------------------
 ln
@@ -130,23 +152,20 @@ ex '.\scripts4PythonAutomation\setup-core.ps1 -PythonExePath "C:\Users\you\AppDa
 
 
 # ---------------------------------------------------------------------------
-h2 '-UpdateDependencies  [switch]   (default: off)'
+h2 '-UpdateDependencies  [switch]'
 # ---------------------------------------------------------------------------
 ln
-ln '  Re-resolves all dependencies to the latest versions allowed by the'
-ln '  constraints in pyproject.toml and rewrites the lock file.'
+ln '  In the full setup pipeline, this is retained for backward compatibility;'
+ln '  the default setup behavior already upgrades all dependencies unless'
+ln '  -PinExact is used.'
 ln
-hl '  Off (default)'
-ln '    poetry install  — installs exact versions from poetry.lock (reproducible).'
-ln '    uv sync         — installs exact versions from uv.lock     (reproducible).'
-ln
-hl '  On (-UpdateDependencies)'
-ln '    poetry update   — re-resolves; rewrites poetry.lock.'
-ln '    uv sync --upgrade — re-resolves; rewrites uv.lock.'
+ln '  In -Mode update-venv, this intentionally upgrades all dependencies in the'
+ln '  existing .venv: poetry update, uv sync --upgrade, or pip install --upgrade'
+ln '  -r requirements.txt.'
 ln
 ln '  Examples:'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -UpdateDependencies'
-ex '.\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv -UpdateDependencies'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv -UpdateDependencies'
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +286,7 @@ ln 'supports direct use from automation that imports the module.'
 h2 'Venv control'
 ln
 kv '-ProjectRoot <string>'       "Project root containing pyproject.toml.  Default: current directory."
+kv '-Mode <string>'              "setup or update-venv. Default: setup."
 kv '-ForceRecreateVenv <bool>'   "Remove and recreate .venv on every run.  Default: `$false."
 kv '-SkipPoetryInstall <bool>'   "Skip Poetry dependency installation.  Default: `$false."
 kv '-NonInteractive <bool>'      "No pause prompts; exceptions propagate instead.  Default: `$false."
@@ -307,6 +327,12 @@ ex '.\scripts4PythonAutomation\setup-core.ps1 -UpdateDependencies'
 h2 'Upgrade all dependencies to latest allowed versions  (UV)'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -PackageManager uv -UpdateDependencies'
 
+h2 'Refresh the existing .venv only'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv'
+
+h2 'Upgrade dependencies inside the existing .venv only'
+ex '.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv -UpdateDependencies'
+
 h2 'Pin a specific Python interpreter and run non-interactively'
 ex '.\scripts4PythonAutomation\setup-core.ps1 -PythonExePath "C:\Python311\python.exe" -NonInteractive'
 
@@ -337,29 +363,32 @@ ex '.\scripts4PythonAutomation\setup-core.ps1 -PackageManager auto -DryRun'
 
 
 # ===========================================================================
-h1 'PYTHON SELECTION — INTERACTIVE PROMPT'
+h1 'MAIN INTERACTIVE PROMPT'
 # ===========================================================================
 ln
-ln '  When setup-core.ps1 starts without -PythonExePath, it shows:'
+ln '  When setup-core.ps1 starts interactively without -Mode, -PythonExePath, or -ListMode, it shows:'
 ln
 ln '    +----------------------------------------------------------+'
-ln '    |  How should Setup select a Python interpreter?           |'
+ln '    |  What should Setup do?                                  |'
 ln '    +----------------------------------------------------------+'
-ln '    |  [Enter]   Semi-auto  – script finds best compatible     |'
-ln '    |             Python automatically (recommended)           |'
-ln '    |  [l]       List       – show ALL Pythons, you pick one   |'
-ln '    |  <path>    Explicit   – full path to python.exe          |'
+ln '    |  [Enter]   Full setup, semi-auto Python selection        |'
+ln '    |  [u]       Update existing .venv only                    |'
+ln '    |  [l]       Full setup, list all Pythons and choose one   |'
+ln '    |  <path>    Full setup, explicit path to python.exe       |'
 ln '    +----------------------------------------------------------+'
 ln
-kv '[Enter]  Semi-auto' 'Script scans PATH, registry, and known install locations,'
+kv '[Enter]  Full setup' 'Script scans PATH, registry, and known install locations,'
 ln "                               selects the lowest compatible Python (>=3.11, <3.13)."
 ln "                               Runs without further prompts — recommended for most users."
 ln
+kv '[u]  Update venv'    'Refreshes the existing .venv only. Skips Python install,'
+ln "                               tool bootstrap, venv recreation, VS Code wiring, DLL copy, and signing."
+ln
 kv '[l]  List'          'Displays all discovered Python interpreters with compatibility'
-ln "                               badges, then waits for a number input."
+ln "                               badges, then waits for a number input before full setup."
 ln
 kv '<path>  Explicit'   'Accepts a full path, e.g. C:\Python311\python.exe'
-ln "                               Validated against pyproject.toml constraints."
+ln "                               Validated against pyproject.toml constraints before full setup."
 
 
 # ===========================================================================
@@ -372,7 +401,9 @@ kv ' 0/13  Prechecks'          'Network diagnostics + required DigiCert check.'
 kv ' 1/13  Parse metadata'     'Read pyproject.toml — project name, requires-python.'
 kv ' 2/13  Resolve Python'     'Find or validate the target Python interpreter.'
 kv ' 3/13  PM runtime'         'Ensure Poetry / uv is installed; bootstraps with selected Python if missing.'
+kv '       PATH'               'Persist installed Python/Scripts/Poetry/uv CLI dirs for future shells.'
 kv '3a/13  Sign PM exe'        'Code-sign the PM executable (poetry.exe shim or uv.exe).'
+kv '       install paths'      'New Python/Poetry/uv installs print full executable paths.'
 kv ' 4/13  Configure PM'       'Poetry: set virtualenvs.in-project = true.  UV: no-op.'
 kv '5a/13  Clean envs'         'Poetry: remove stale env associations.  UV: no-op.'
 kv '5b/13  Backup + remove'    'Snapshot .venv → .venv_backup_<ts> for rollback; then remove.'
@@ -381,6 +412,7 @@ kv ' 6/13  Validate .venv'     'Verify .venv directory structure is complete.'
 kv ' 7/13  Copy DLL'           'Copy pythonXY.dll into .venv for runtime isolation.'
 kv ' 8/13  Sync lock file'     'uv lock  /  poetry lock --no-update — align with pyproject.toml.'
 kv ' 9/13  Install deps'       'uv sync  /  poetry install  (or upgrade variants).'
+kv '9a/13  PATH'               'Persist .venv\Scripts so project CLIs work in future terminals.'
 kv '10/13  Write .pth'         'Add project root to .venv site-packages via .pth file.'
 kv '11/13  VS Code settings'   'Write .vscode/settings.json to point at the new .venv.'
 kv '12/13  Copy tcl'           'Copy tcl/tk runtime into .venv if present (optional).'
@@ -411,6 +443,7 @@ kv 'poetry.lock  /  uv.lock'        'Lock file written or updated by steps 8-9.'
 kv '.venv\Lib\site-packages\*.pth'  'Project root path entry written by step 10.'
 kv '.setup-config.json'             'Persisted after a successful run: explicit PackageManager and'
 kv '                            '   'PinnedVersions. Dependency scope stays CLI-only.'
+kv 'User PATH / shell rc'           'Installed CLI dirs, including .venv\Scripts, are added idempotently.'
 
 
 # ===========================================================================

@@ -7,6 +7,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$import = 'Microsoft.PowerShell.Core\Import-Module'
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1') -Force -DisableNameChecking -ErrorAction Stop
+
 <#
 .SYNOPSIS
     File and process utility helpers for setup cleanup operations.
@@ -186,11 +189,9 @@ function Add-PythonScriptsDirToPath {
         # Probe both system and Windows user scripts dirs; pip may install to either.
         $pyCode = "import sysconfig,os; s=sysconfig.get_path('scripts'); u=sysconfig.get_path('scripts','nt_user'); print(os.pathsep.join(d for d in [s,u] if d))"
         $output = (& $PythonExe -c $pyCode 2>$null).Trim()
-        foreach ($scriptsDir in ($output -split [System.IO.Path]::PathSeparator)) {
-            $scriptsDir = $scriptsDir.Trim()
-            if ($scriptsDir -and (Test-Path $scriptsDir -PathType Container) -and ($env:PATH -notlike "*$scriptsDir*")) {
-                $env:PATH = "$scriptsDir$([System.IO.Path]::PathSeparator)$env:PATH"
-            }
+        $scriptDirs = @($output -split [System.IO.Path]::PathSeparator | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($scriptDirs.Count -gt 0) {
+            Add-ToolDirsToPath -Directories $scriptDirs -Reason 'Python Scripts CLI' | Out-Null
         }
     } catch { }
 }

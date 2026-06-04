@@ -19,6 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1')          -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Versioning.psm1')    -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
@@ -780,45 +781,7 @@ function Add-PythonInstallDirsToPath {
 #>
     param([Parameter(Mandatory=$true)][string[]] $Directories)
 
-    $validDirs = @($Directories | Where-Object {
-        $_ -and (Test-Path -LiteralPath $_ -PathType Container)
-    } | Select-Object -Unique)
-
-    if ($validDirs.Count -eq 0) { return }
-
-    foreach ($dir in $validDirs) {
-        if ($env:Path.IndexOf($dir, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            $env:Path = "$dir;$env:Path"
-        }
-    }
-
-    try {
-        $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-        if (-not $userPath) { $userPath = '' }
-        $userParts = @($userPath -split ';' | Where-Object { $_ })
-        $updated = $false
-
-        foreach ($dir in $validDirs) {
-            $exists = $false
-            foreach ($part in $userParts) {
-                if ($part.Trim().Equals($dir, [StringComparison]::OrdinalIgnoreCase)) {
-                    $exists = $true
-                    break
-                }
-            }
-            if (-not $exists) {
-                $userParts = @($dir) + $userParts
-                $updated = $true
-            }
-        }
-
-        if ($updated) {
-            [System.Environment]::SetEnvironmentVariable('Path', ($userParts -join ';'), 'User')
-            Write-Host '  Updated current user PATH for future shells.' -ForegroundColor DarkGray
-        }
-    } catch {
-        Write-Host ("  [WARN] Could not update user PATH: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
-    }
+    Add-ToolDirsToPath -Directories $Directories -Reason 'Python install' | Out-Null
 }
 
 <#
@@ -1038,9 +1001,9 @@ function Install-RequiredPython {
             "",
             $baseError,
             "",
-            "═══════════════════════════════════════════════════════════════",
+            "---------------------------------------------------------------",
             "ALTERNATIVE: Provide your own Python installation",
-            "═══════════════════════════════════════════════════════════════",
+            "---------------------------------------------------------------",
             "",
             "If you have Python $requestedVersion installed elsewhere,",
             "you can provide the path directly to skip the download:",
@@ -1083,8 +1046,12 @@ function Install-RequiredPython {
 
     if ($foundExe) {
         $resolvedDir = Split-Path $foundExe
+        $resolvedScriptsDir = Join-Path $resolvedDir 'Scripts'
         Write-Host ("  Located at: {0}" -f $foundExe) -ForegroundColor DarkGray
-        Add-PythonInstallDirsToPath -Directories @($resolvedDir, (Join-Path $resolvedDir 'Scripts'))
+        Write-Host ("  Python executable: {0}" -f $foundExe) -ForegroundColor Green
+        Write-Host ("  Python install dir: {0}" -f $resolvedDir) -ForegroundColor Green
+        Write-Host ("  Python Scripts dir: {0}" -f $resolvedScriptsDir) -ForegroundColor Green
+        Add-PythonInstallDirsToPath -Directories @($resolvedDir, $resolvedScriptsDir)
     } else {
         # Fallback: refresh PATH from registry + try py.exe launcher
         $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -1105,8 +1072,12 @@ function Install-RequiredPython {
                     $resolvedPath = $resolved.Trim()
                     $resolvedDir  = Split-Path $resolvedPath
                     if ($resolvedDir) {
-                        Add-PythonInstallDirsToPath -Directories @($resolvedDir, (Join-Path $resolvedDir 'Scripts'))
+                        $resolvedScriptsDir = Join-Path $resolvedDir 'Scripts'
+                        Add-PythonInstallDirsToPath -Directories @($resolvedDir, $resolvedScriptsDir)
                         Write-Host ("  Located via py.exe: {0}" -f $resolvedPath) -ForegroundColor DarkGray
+                        Write-Host ("  Python executable: {0}" -f $resolvedPath) -ForegroundColor Green
+                        Write-Host ("  Python install dir: {0}" -f $resolvedDir) -ForegroundColor Green
+                        Write-Host ("  Python Scripts dir: {0}" -f $resolvedScriptsDir) -ForegroundColor Green
                     }
                     $foundExe = $resolvedPath
                 }

@@ -28,6 +28,7 @@ $ErrorActionPreference = 'Stop'
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Compat.psm1')         -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')             -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1')           -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1')  -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Filesystem.psm1')     -Force -DisableNameChecking -ErrorAction Stop
 
@@ -109,6 +110,7 @@ function Initialize-UvRuntime {
 
     $exe = Get-UvExe
     if ($exe) {
+        Add-ToolDirsToPath -Directories @((Split-Path $exe -Parent)) -Reason 'uv CLI' | Out-Null
         $version = Get-UvVersion
         return [pscustomobject]@{ Source = 'existing'; Version = $version; Exe = $exe }
     }
@@ -149,6 +151,8 @@ function Initialize-UvRuntime {
 
     $version = Get-UvVersion
     Write-Banner "uv installed via pip. Version: $version" 'SUCCESS'
+    Write-Host ("  uv executable: {0}" -f $exe) -ForegroundColor Green
+    Write-Host ("  uv install dir: {0}" -f (Split-Path $exe -Parent)) -ForegroundColor Green
     return [pscustomobject]@{ Source = 'installed'; Version = $version; Exe = $exe }
 }
 

@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1')          -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Filesystem.psm1')    -Force -DisableNameChecking -ErrorAction Stop
 
@@ -108,15 +109,7 @@ function Add-PoetryShimToPath {
     $poetryBinDir = [System.IO.Path]::GetFullPath((Split-Path $ShimPath -Parent))
     if (-not $poetryBinDir -or -not (Test-Path -LiteralPath $poetryBinDir -PathType Container)) { return }
 
-    if ($env:Path.IndexOf($poetryBinDir, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        $env:Path = "$poetryBinDir;$env:Path"
-    }
-    try {
-        $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-        if ($userPath.IndexOf($poetryBinDir, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            [System.Environment]::SetEnvironmentVariable('Path', "$poetryBinDir;$userPath", 'User')
-        }
-    } catch { }
+    Add-ToolDirsToPath -Directories @($poetryBinDir) -Reason 'Poetry CLI' | Out-Null
 }
 
 <#
@@ -204,6 +197,7 @@ function Initialize-PoetryRuntime {
 
     # Fast path 2: Poetry importable from the selected project Python.
     if (Test-PoetryAvailable -PythonExe $PythonExe) {
+        Add-PythonScriptsDirToPath -PythonExe $PythonExe
         $version = Get-PoetryVersion -PoetryPython $PythonExe
         return (New-PoetryRuntimeInfo -PoetryPython $PythonExe -Source 'project-python' -ShimPath (Get-PoetryShimPath) -RuntimeDir $null -PoetryVersion $version)
     }
@@ -225,6 +219,7 @@ function Initialize-PoetryRuntime {
     $versionSpec  = if ($PinnedVersion) { "poetry==$PinnedVersion" } else { 'poetry' }
     $versionLabel = if ($PinnedVersion) { "v$PinnedVersion" } else { 'latest' }
     $installed    = $false
+    $installMethod = $null
 
     $pipxCmd = Get-Command 'pipx' -ErrorAction SilentlyContinue
     if ($pipxCmd) {
@@ -232,14 +227,13 @@ function Initialize-PoetryRuntime {
         try {
             $r = Invoke-NativeCommand -Executable $pipxCmd.Source -Arguments @('install', $versionSpec) -FailureMessage "pipx install poetry failed."
             $installed = $r.Succeeded
+            if ($installed) { $installMethod = 'pipx' }
         } catch { $installed = $false }
 
         if ($installed) {
             # pipx installs to %USERPROFILE%\.local\bin - add to PATH if not already there.
             $localBin = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.local\bin'
-            if ((Test-Path $localBin -PathType Container) -and ($env:PATH.IndexOf($localBin, [StringComparison]::OrdinalIgnoreCase) -lt 0)) {
-                $env:PATH = "$localBin$([System.IO.Path]::PathSeparator)$env:PATH"
-            }
+            Add-ToolDirsToPath -Directories @($localBin) -Reason 'pipx CLI' | Out-Null
         }
     }
 
@@ -248,6 +242,7 @@ function Initialize-PoetryRuntime {
         try {
             $r = Invoke-NativeCommand -Executable $PythonExe -Arguments @('-m', 'pip', 'install', '--quiet', $versionSpec) -FailureMessage "pip install poetry failed."
             $installed = $r.Succeeded
+            if ($installed) { $installMethod = 'pip' }
         } catch { $installed = $false }
 
         if ($installed) {
@@ -266,6 +261,9 @@ function Initialize-PoetryRuntime {
     if ($shim) {
         $version = Get-PoetryVersion -PoetryPython $shim
         Write-Banner "Poetry installed. Version: $version" 'SUCCESS'
+        Write-Host ("  Poetry install method: {0}" -f $installMethod) -ForegroundColor Green
+        Write-Host ("  Poetry executable: {0}" -f $shim) -ForegroundColor Green
+        Write-Host ("  Poetry install dir: {0}" -f (Split-Path $shim -Parent)) -ForegroundColor Green
         return (New-PoetryRuntimeInfo -PoetryPython $shim -Source 'installed' -ShimPath $shim -RuntimeDir $null -PoetryVersion $version)
     }
 
@@ -273,6 +271,9 @@ function Initialize-PoetryRuntime {
     if (Test-PoetryAvailable -PythonExe $PythonExe) {
         $version = Get-PoetryVersion -PoetryPython $PythonExe
         Write-Banner "Poetry installed. Version: $version" 'SUCCESS'
+        Write-Host ("  Poetry install method: {0}" -f $installMethod) -ForegroundColor Green
+        Write-Host ("  Poetry module runner: {0}" -f $PythonExe) -ForegroundColor Green
+        Write-Host ("  Poetry installed into Python: {0}" -f $PythonExe) -ForegroundColor Green
         return (New-PoetryRuntimeInfo -PoetryPython $PythonExe -Source 'installed' -ShimPath $null -RuntimeDir $null -PoetryVersion $version)
     }
 

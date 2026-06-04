@@ -28,6 +28,7 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 $moduleLoadOrder = @(
     'Compat',           # platform shims - must be first
     'UI',               # logging helpers - no dependencies
+    'Path',             # persistent PATH updates for installed CLI tools
     'Versioning',       # version constraint parsing
     'Toml',             # pyproject.toml parsing
     'NativeCommand',    # process execution primitives
@@ -96,6 +97,135 @@ function Invoke-SetupStep {
         }
         if ($Mandatory) { throw }
     }
+}
+
+function Invoke-ExistingVenvUpdate {
+<#
+.SYNOPSIS
+    Refreshes an existing project .venv without running the full setup pipeline.
+
+.DESCRIPTION
+    Uses the dependency system already declared by the project. It does not
+    install Python, install package-manager CLIs, recreate .venv, write editor
+    settings, copy runtime DLLs, or run code signing. If the required CLI is
+    missing, it fails with a clear message so the operator can run setup once.
+#>
+    param([Parameter(Mandatory=$true)][hashtable] $Ctx)
+
+    Confirm-VenvExists -VenvDir $Ctx.VenvDir
+    $venvPython = Get-VenvPythonExe -VenvDir $Ctx.VenvDir
+    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        throw ("Existing .venv Python was not found: {0}" -f $venvPython)
+    }
+
+    $requirementsFile = Join-Path $Ctx.ProjectRoot 'requirements.txt'
+    $pyprojectFile = Join-Path $Ctx.ProjectRoot 'pyproject.toml'
+
+    if ($Ctx.PmSource -eq 'default' -and (Test-Path -LiteralPath $requirementsFile -PathType Leaf)) {
+        $Ctx.PackageManager = 'pip-requirements'
+        Write-LogDetail -Key 'source' -Value 'requirements.txt'
+    }
+
+    Write-LogDetail -Key 'venv_dir' -Value $Ctx.VenvDir
+    Write-LogDetail -Key 'venv_python' -Value $venvPython
+    Write-LogDetail -Key 'dependency_system' -Value $Ctx.PackageManager
+    Write-LogDetail -Key 'include_dev' -Value $Ctx.IncludeDev
+
+    switch ($Ctx.PackageManager) {
+        'uv' {
+            $uvExe = Get-UvExe
+            if (-not $uvExe) {
+                throw 'update-venv mode found a uv project, but uv is not installed or discoverable. Run full setup once, or install uv and rerun this mode.'
+            }
+            Add-ToolDirsToPath -Directories @((Split-Path $uvExe -Parent)) -Reason 'uv CLI' | Out-Null
+            $Ctx.UvInfo = [pscustomobject]@{ Source = 'existing'; Version = Get-UvVersion; Exe = $uvExe }
+
+            if ($Ctx.UpgradePackages -and $Ctx.UpgradePackages.Count -gt 0) {
+                Write-Host ("  Updating selected package(s) in existing .venv with uv: {0}" -f ($Ctx.UpgradePackages -join ', ')) -ForegroundColor Yellow
+                Invoke-PmUpdateSelectedDeps -Ctx $Ctx -Packages $Ctx.UpgradePackages -IncludeDev $Ctx.IncludeDev
+            } elseif ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
+                Write-Host '  Updating all dependencies in existing .venv with uv sync --upgrade.' -ForegroundColor Yellow
+                Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
+            } else {
+                Write-Host '  Refreshing existing .venv with uv sync.' -ForegroundColor Yellow
+                Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
+            }
+        }
+
+        'poetry' {
+            $poetryRunner = Get-PoetryShimPath
+            if ($poetryRunner) {
+                Add-ToolDirsToPath -Directories @((Split-Path $poetryRunner -Parent)) -Reason 'Poetry CLI' | Out-Null
+            } elseif (Test-PoetryAvailable -PythonExe $venvPython) {
+                $poetryRunner = $venvPython
+            } else {
+                throw 'update-venv mode found a Poetry project, but Poetry is not installed or discoverable. Run full setup once, or install Poetry and rerun this mode.'
+            }
+            $Ctx.PoetryPythonPath = $poetryRunner
+            $Ctx.PmPythonPath = $poetryRunner
+
+            if ($Ctx.UpgradePackages -and $Ctx.UpgradePackages.Count -gt 0) {
+                Write-Host ("  Updating selected package(s) in existing .venv with Poetry: {0}" -f ($Ctx.UpgradePackages -join ', ')) -ForegroundColor Yellow
+                Invoke-PmUpdateSelectedDeps -Ctx $Ctx -Packages $Ctx.UpgradePackages -IncludeDev $Ctx.IncludeDev
+            } elseif ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
+                Write-Host '  Updating all dependencies in existing .venv with poetry update.' -ForegroundColor Yellow
+                Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
+            } else {
+                Write-Host '  Refreshing existing .venv with poetry install.' -ForegroundColor Yellow
+                Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
+            }
+        }
+
+        'pip-requirements' {
+            $pipArgs = @('-m', 'pip', 'install')
+            if ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
+                $pipArgs += '--upgrade'
+                Write-Host '  Updating existing .venv from requirements.txt with pip --upgrade.' -ForegroundColor Yellow
+            } else {
+                Write-Host '  Refreshing existing .venv from requirements.txt with pip.' -ForegroundColor Yellow
+            }
+            $pipArgs += @('-r', $requirementsFile)
+            Invoke-NativeCommand `
+                -Executable       $venvPython `
+                -Arguments        $pipArgs `
+                -WorkingDirectory $Ctx.ProjectRoot `
+                -PassThrough `
+                -ThrowOnError `
+                -FailureMessage   "'pip install -r requirements.txt' failed -- see output above." | Out-Null
+        }
+
+        default {
+            if (Test-Path -LiteralPath $requirementsFile -PathType Leaf) {
+                $Ctx.PackageManager = 'pip-requirements'
+                Write-Host '  Refreshing existing .venv from requirements.txt with pip.' -ForegroundColor Yellow
+                Invoke-NativeCommand `
+                    -Executable       $venvPython `
+                    -Arguments        @('-m', 'pip', 'install', '-r', $requirementsFile) `
+                    -WorkingDirectory $Ctx.ProjectRoot `
+                    -PassThrough `
+                    -ThrowOnError `
+                    -FailureMessage   "'pip install -r requirements.txt' failed -- see output above." | Out-Null
+            } elseif (Test-Path -LiteralPath $pyprojectFile -PathType Leaf) {
+                $pipArgs = @('-m', 'pip', 'install')
+                if ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) { $pipArgs += '--upgrade' }
+                $pipArgs += @('-e', $Ctx.ProjectRoot)
+                Write-Host '  Refreshing existing .venv from pyproject.toml with pip editable install.' -ForegroundColor Yellow
+                Invoke-NativeCommand `
+                    -Executable       $venvPython `
+                    -Arguments        $pipArgs `
+                    -WorkingDirectory $Ctx.ProjectRoot `
+                    -PassThrough `
+                    -ThrowOnError `
+                    -FailureMessage   "'pip install -e .' failed -- see output above." | Out-Null
+            } else {
+                throw 'Could not detect a supported dependency system for update-venv mode. Expected uv.lock/[tool.uv], poetry.lock/[tool.poetry], requirements.txt, or pyproject.toml.'
+            }
+        }
+    }
+
+    $venvScriptsDir = Join-Path $Ctx.VenvDir 'Scripts'
+    Add-ToolDirsToPath -Directories @($venvScriptsDir) -Reason 'project .venv CLI' | Out-Null
+    Write-Host '  Existing virtual environment refresh completed.' -ForegroundColor Green
 }
 
 
@@ -255,6 +385,10 @@ function Start-Setup {
         [bool] $AllowPythonInstall = $true,
 
         [Parameter()]
+        [ValidateSet('setup','update-venv','venv-update','refresh-venv')]
+        [string] $Mode = 'setup',
+
+        [Parameter()]
         # One or more package names to re-resolve to their latest allowed
         # versions while leaving every other locked version untouched.
         # Ideal for Git-branch-ref dependencies (e.g. an Azure DevOps library
@@ -331,6 +465,7 @@ function Start-Setup {
             PinExact             = $PinExact            # bool; install exact lock-file versions
             VenvBackupPath       = $null                # set by New-VenvBackup before step 5b
             PrechecksWouldAbort  = $false
+            Mode                 = $Mode
         }
 
         Write-LogStepStart -Step 'SETUP' -Module 'Core' -Message 'Initialize setup context'
@@ -338,6 +473,7 @@ function Start-Setup {
         Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
         Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
         Write-LogDetail -Key 'code_signing' -Value $ctx.EnableCodeSigning
+        Write-LogDetail -Key 'mode'         -Value $ctx.Mode
         if ($script:setupDryRun) {
             Write-LogDetail -Key 'dry_run' -Value 'true  - NO CHANGES will be made to the file system'
         }
@@ -349,6 +485,64 @@ function Start-Setup {
         Invoke-SetupStep -Step 'DETECT' -Module 'Detection' -Message 'Detect package manager from project files' -Mandatory $true -ReadOnly $true -Action {
             Invoke-PmDetection -Ctx $ctx
         } | Out-Null
+
+        # Main interactive choice. Keep this before full-setup prechecks so a
+        # user can choose update-venv without needing DigiCert/Python setup checks.
+        # Only shown when no explicit mode/path/list choice was provided via CLI.
+        if (-not $ctx.NonInteractive -and
+            $ctx.Mode -eq 'setup' -and
+            -not $ctx.PythonExePath -and
+            -not $ctx.ListMode) {
+
+            Write-Host ''
+            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+            Write-Host '|  What should Setup do?                                    |' -ForegroundColor Cyan
+            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+            Write-Host '|  [Enter]   Full setup, semi-auto Python selection          |' -ForegroundColor DarkGray
+            Write-Host '|  [u]       Update existing .venv only                      |' -ForegroundColor DarkGray
+            Write-Host '|  [l]       Full setup, list all Pythons and choose one     |' -ForegroundColor DarkGray
+            Write-Host '|  <path>    Full setup, explicit path to python.exe         |' -ForegroundColor DarkGray
+            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+            Write-Host ''
+            $userSetupInput = Read-Host 'Choice (Enter = full setup)'
+            $userSetupInput = if ($userSetupInput) { $userSetupInput.Trim() } else { '' }
+
+            if ($userSetupInput -in @('u', 'update', 'update-venv', 'venv-update', 'refresh-venv')) {
+                $ctx.Mode = 'update-venv'
+                Write-Host 'Update mode selected. Setup will refresh the existing .venv only.' -ForegroundColor DarkGray
+            } elseif ($userSetupInput -ieq 'l' -or $userSetupInput -ieq 'list') {
+                $ctx.ListMode = $true
+                Write-Host 'List mode selected. All Python installations will be shown.' -ForegroundColor DarkGray
+            } elseif (-not [string]::IsNullOrWhiteSpace($userSetupInput)) {
+                $candidate = $userSetupInput.Trim('"').Trim("'")
+                try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch { }
+                $ctx.PythonExePath = $candidate
+                Write-Host ("Explicit path accepted: {0}" -f $ctx.PythonExePath) -ForegroundColor DarkGray
+            } else {
+                Write-Host 'Full setup selected. Setup will find the best compatible Python.' -ForegroundColor DarkGray
+            }
+        }
+
+        if ($ctx.Mode -in @('update-venv', 'venv-update', 'refresh-venv')) {
+            Invoke-SetupStep -Step 'UPDATE-VENV' -Module 'Venv' -Message 'Refresh existing virtual environment only' -Mandatory $true -Action {
+                Invoke-ExistingVenvUpdate -Ctx $ctx
+            } | Out-Null
+
+            $updateDoneMessage = if ($script:setupDryRun) {
+                'Dry run completed; existing virtual environment refresh was not executed'
+            } else {
+                'Existing virtual environment refreshed successfully'
+            }
+            Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message $updateDoneMessage
+
+            [pscustomobject]@{
+                ProjectRoot    = $ctx.ProjectRoot
+                PackageManager = $ctx.PackageManager
+                VenvDir        = $ctx.VenvDir
+                Mode           = $ctx.Mode
+            }
+            return
+        }
 
         # Step 0: Pre-setup checks
         # Runs before anything is modified on disk.  Non-critical failures warn.
@@ -373,35 +567,6 @@ function Start-Setup {
             Write-LogDetail -Key 'prechecks_passed' -Value $prechecks.AllPassed
             Write-LogDetail -Key 'code_signing_effective' -Value $ctx.EnableCodeSigning
         } | Out-Null
-
-        # Python interpreter mode prompt (runs after prechecks, before discovery)
-        # Only shown when no explicit path/mode was provided via CLI.
-        if (-not $ctx.NonInteractive -and -not $ctx.PythonExePath -and -not $ctx.ListMode) {
-            Write-Host ''
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host '|  How should Setup select a Python interpreter?             |' -ForegroundColor Cyan
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host '|  [Enter]   Semi-auto  =>> script finds best compatible     |' -ForegroundColor DarkGray
-            Write-Host '|             Python automatically (recommended)             |' -ForegroundColor DarkGray
-            Write-Host '|  [l]       List       =>> show ALL Pythons, you pick one   |' -ForegroundColor DarkGray
-            Write-Host '|  <path>    Explicit   =>> full path to python.exe          |' -ForegroundColor DarkGray
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host ''
-            $userPythonInput = Read-Host 'Choice (Enter = semi-auto)'
-            $userPythonInput = if ($userPythonInput) { $userPythonInput.Trim() } else { '' }
-
-            if ($userPythonInput -ieq 'l' -or $userPythonInput -ieq 'list') {
-                $ctx.ListMode = $true
-                Write-Host 'List mode selected. All Python installations will be shown.' -ForegroundColor DarkGray
-            } elseif (-not [string]::IsNullOrWhiteSpace($userPythonInput)) {
-                $candidate = $userPythonInput.Trim('"').Trim("'")
-                try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch { }
-                $ctx.PythonExePath = $candidate
-                Write-Host ("Explicit path accepted: {0}" -f $ctx.PythonExePath) -ForegroundColor DarkGray
-            } else {
-                Write-Host 'Semi-autonomous mode. Setup will find the best compatible Python.' -ForegroundColor DarkGray
-            }
-        }
 
         # Step 1: Parse pyproject.toml
         Invoke-SetupStep -Step '1/13' -Module 'PyProject' -Message 'Parse project metadata' -Mandatory $true -ReadOnly $true -Action {
@@ -556,6 +721,10 @@ function Start-Setup {
                 } | Out-Null
             }
         }
+
+        Invoke-SetupStep -Step '9a/13' -Module 'Path' -Message 'Persist project .venv CLI tools on PATH' -Mandatory $false -Action {
+            Add-ToolDirsToPath -Directories @((Join-Path $ctx.VenvDir 'Scripts')) -Reason 'project .venv CLI' | Out-Null
+        } | Out-Null
 
         # 10. Write .pth file - resolve site-packages path dynamically via the venv python
         Invoke-SetupStep -Step '10/13' -Module 'Venv' -Message 'Write project .pth into site-packages' -Mandatory $true -Action {
