@@ -1,0 +1,158 @@
+#Requires -Version 5.1
+# =============================================================================
+# __COMMAND_NAME__.ps1  -  GENERATED COMMAND SHIM. Do not edit by hand.
+# Regenerate with:  Install-DevSetupCommand -Force
+# -----------------------------------------------------------------------------
+# Flow:
+#   1. Load lightweight runtime config.
+#   2. Auto-update the installed module BEFORE importing it (unless skipped).
+#   3. Relaunch once if an update happened (loop-guarded by an env var).
+#   4. Import PythonVenvAutomation.
+#   5. Map the friendly command and dispatch.
+#
+# NOTE: intentionally no param()/[CmdletBinding()] so the automatic $args
+# variable captures every token verbatim (including '--' and friendly verbs).
+# =============================================================================
+
+$ErrorActionPreference = 'Stop'
+
+$CommandName = '__COMMAND_NAME__'
+$ModuleName  = 'PythonVenvAutomation'
+
+$binDir     = $PSScriptRoot
+$bootstrap  = Join-Path $binDir 'DevSetup.Bootstrap.ps1'
+$configPath = Join-Path (Split-Path -Parent $binDir) 'config.json'
+
+# Original, untouched args for a faithful relaunch.
+$rawArgs = @($args)
+
+# --- Parse shim-level flags and the raw-passthrough boundary (--) ------------
+$noSelfUpdate    = $false
+$forceSelfUpdate = $false
+$seenDashDash    = $false
+$passthrough     = @()   # raw PowerShell params after '--'
+$friendly        = @()   # friendly tokens before '--'
+foreach ($a in $rawArgs) {
+    if ($seenDashDash)                    { $passthrough     += $a }
+    elseif ($a -eq '--')                  { $seenDashDash     = $true }
+    elseif ($a -eq '--no-self-update')    { $noSelfUpdate     = $true }
+    elseif ($a -eq '--force-self-update') { $forceSelfUpdate  = $true }
+    else                                  { $friendly        += $a }
+}
+
+$command = if ($friendly.Count -gt 0) { "$($friendly[0])".ToLowerInvariant() } else { '' }
+
+function Show-DevSetupShimHelp {
+    $c = $CommandName
+    @(
+        "$c - Python project environment setup automation"
+        ''
+        'Usage:'
+        "  $c"
+        "  $c update"
+        "  $c upgrade"
+        "  $c rebuild"
+        "  $c dry"
+        "  $c prod"
+        "  $c list-python"
+        "  $c self-update"
+        "  $c help"
+        ''
+        'Advanced:'
+        "  $c -- -PackageManager uv -NonInteractive"
+        "  $c update -- -UpgradePackage requests"
+        "  $c dry -- -PackageManager poetry"
+        ''
+        'Self-update:'
+        "  $c self-update        Update the automation module and command shims now."
+        "  $c --no-self-update   Skip update check for this run."
+        "  $c --force-self-update"
+        '                              Force update check before running.'
+        ''
+        'Commands:'
+        "  setup        Run full setup. Same as $c."
+        '  update       Refresh existing .venv without reinstalling tools.'
+        '  upgrade      Refresh existing .venv and intentionally upgrade dependencies.'
+        '  rebuild      Remove and recreate .venv.'
+        '  dry          Print the planned setup without modifying files.'
+        '  prod         Install production dependencies only.'
+        '  list-python  Show/select available Python interpreters.'
+        '  self-update  Update this automation command and module.'
+        '  help         Show this help.'
+    ) -join [Environment]::NewLine | Write-Host
+}
+
+if ($command -eq 'help') {
+    Show-DevSetupShimHelp
+    exit 0
+}
+
+# --- Auto-update check (runs BEFORE importing the module for normal runs) -----
+# Loop guard: an env var derived from the command name prevents infinite
+# relaunches if the post-update import still appears outdated for any reason.
+$relaunchEnv = ($CommandName.ToUpperInvariant() -replace '[^A-Z0-9]', '_') + '_AUTO_UPDATE_RELAUNCHED'
+$alreadyRelaunched = Test-Path "env:$relaunchEnv"
+
+# 'self-update' is handled by the module itself; everything else gets the
+# transparent pre-import check unless the user opted out for this invocation.
+$runAutoCheck = (-not $noSelfUpdate) -and (-not $alreadyRelaunched) -and ($command -ne 'self-update')
+
+if ($runAutoCheck) {
+    if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+        Write-Warning "Bootstrap helper not found at $bootstrap; skipping auto-update check."
+    } else {
+        . $bootstrap
+        $updated = $false
+        try {
+            $updated = Invoke-DevSetupBootAutoUpdate -CommandName $CommandName -ConfigPath $configPath -Force:$forceSelfUpdate
+        } catch {
+            Write-Error $_.Exception.Message
+            exit 1
+        }
+        if ($updated) {
+            Write-Host ("Update complete. Restarting {0}..." -f $CommandName)
+            Set-Item "env:$relaunchEnv" '1'
+            try {
+                $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            } catch {
+                $hostExe = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+                if (-not $hostExe) { $hostExe = 'powershell.exe' }
+            }
+            & $hostExe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @rawArgs
+            $code = $LASTEXITCODE
+            Remove-Item "env:$relaunchEnv" -ErrorAction SilentlyContinue
+            exit $code
+        }
+    }
+}
+
+# --- Import the (now current) module and dispatch ----------------------------
+try {
+    Import-Module $ModuleName -ErrorAction Stop
+} catch {
+    Write-Error ("Could not import {0}: {1}" -f $ModuleName, $_.Exception.Message)
+    exit 1
+}
+
+try {
+    switch ($command) {
+        ''            { Invoke-PythonVenvSetup @passthrough }
+        'setup'       { Invoke-PythonVenvSetup @passthrough }
+        'update'      { Invoke-PythonVenvSetup -Mode update-venv @passthrough }
+        'upgrade'     { Invoke-PythonVenvSetup -Mode update-venv -UpdateDependencies @passthrough }
+        'rebuild'     { Invoke-PythonVenvSetup -ForceRecreateVenv @passthrough }
+        'dry'         { Invoke-PythonVenvSetup -DryRun @passthrough }
+        'prod'        { Invoke-PythonVenvSetup -ExcludeDev @passthrough }
+        'list-python' { Invoke-PythonVenvSetup -ListMode @passthrough }
+        'self-update' { Update-PythonVenvAutomation }
+        default {
+            Write-Warning ("Unknown command: {0}" -f $command)
+            Show-DevSetupShimHelp
+            exit 2
+        }
+    }
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}

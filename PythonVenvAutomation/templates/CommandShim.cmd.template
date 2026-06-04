@@ -1,0 +1,13 @@
+@echo off
+rem ===========================================================================
+rem __COMMAND_NAME__.cmd - GENERATED COMMAND SHIM. Do not edit by hand.
+rem Lets CMD users run "__COMMAND_NAME__" directly. Prefers pwsh, falls back to
+rem Windows PowerShell. Regenerate with: Install-DevSetupCommand -Force
+rem ===========================================================================
+where pwsh >nul 2>nul
+if %ERRORLEVEL% EQU 0 (
+    pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0__COMMAND_NAME__.ps1" %*
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0__COMMAND_NAME__.ps1" %*
+)
+exit /b %ERRORLEVEL%

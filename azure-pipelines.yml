@@ -1,0 +1,111 @@
+# =============================================================================
+# azure-pipelines.yml - Validate / Build / Publish for PythonVenvAutomation
+# -----------------------------------------------------------------------------
+# - Pull requests        -> Validate only.
+# - Pushes to branches   -> Validate (+ Build).
+# - Version tags (v*)    -> Validate + Build + Publish to Azure Artifacts.
+#
+# Adapt by changing ONLY the variables block below. Secrets (the feed API key)
+# must come from a secure pipeline variable named NUGET_API_KEY - never inline.
+# =============================================================================
+
+variables:
+  PSRepositoryName: 'CompanyPS'
+  PSRepositoryUri: 'https://pkgs.dev.azure.com/REPLACE_ORG/REPLACE_PROJECT/_packaging/REPLACE_FEED/nuget/v3/index.json'
+
+trigger:
+  branches:
+    include:
+      - main
+      - '*'
+  tags:
+    include:
+      - 'v*'
+
+pr:
+  branches:
+    include:
+      - '*'
+
+pool:
+  vmImage: 'windows-latest'
+
+stages:
+  # ---------------------------------------------------------------------------
+  - stage: Validate
+    displayName: Validate
+    jobs:
+      - job: validate
+        displayName: Static checks + Pester
+        steps:
+          - task: PowerShell@2
+            displayName: Ensure tooling (PSResourceGet + Pester)
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
+                  Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
+                }
+                if (-not (Get-Module -ListAvailable Pester | Where-Object Version -ge '5.0')) {
+                  Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+                }
+          - task: PowerShell@2
+            displayName: Run validation
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: ./build/Test.ps1
+
+  # ---------------------------------------------------------------------------
+  - stage: Build
+    displayName: Build
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: build
+        displayName: Package module
+        steps:
+          - task: PowerShell@2
+            displayName: Build package
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: ./build/Build.ps1
+          - publish: artifacts
+            artifact: PythonVenvAutomation
+            displayName: Publish pipeline artifact
+          - publish: install.ps1
+            artifact: installer
+            displayName: Publish installer (install.ps1)
+
+  # ---------------------------------------------------------------------------
+  - stage: Publish
+    displayName: Publish
+    dependsOn: Build
+    # Only publish for version tags (v1.2.3).
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
+    jobs:
+      - job: publish
+        displayName: Publish to Azure Artifacts
+        steps:
+          - download: current
+            artifact: PythonVenvAutomation
+          - task: PowerShell@2
+            displayName: Publish module package
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
+                  Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
+                }
+                # Rebuild the staging tree on this agent, then publish it.
+                ./build/Build.ps1 | Out-Null
+                ./build/Publish.ps1 -RepositoryName "$(PSRepositoryName)" -RepositoryUri "$(PSRepositoryUri)" -ApiKey "$(NUGET_API_KEY)"
+            env:
+              # Secure pipeline variable. Mapped here so it is masked in logs and
+              # never printed. Define NUGET_API_KEY as a secret variable/library.
+              NUGET_API_KEY: $(NUGET_API_KEY)

@@ -1,0 +1,19 @@
+# Build output
+artifacts/
+
+# Bundled engine copied into the module at build time (source of truth lives in
+# scripts4PythonAutomation/). Never commit the generated copy.
+PythonVenvAutomation/engine/
+
+# Python virtual environment
+.venv/
+.setup-config.json
+
+# Generated runtime state (only ever created under %LOCALAPPDATA%, but ignore
+# any stray local copies)
+config.json
+update.lock
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
