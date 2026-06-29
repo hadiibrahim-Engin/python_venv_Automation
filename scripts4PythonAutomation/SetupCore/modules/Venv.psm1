@@ -101,40 +101,84 @@ function Confirm-VenvPythonCompatible {
 
     $venvPython = Get-VenvPythonExe -VenvDir $VenvDir
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        throw (".venv exists but its Python executable is missing: {0}. Re-run with -ForceRecreateVenv." -f $venvPython)
+        throw (".venv exists but its Python executable is missing: {0}." -f $venvPython)
     }
 
     $probeCode = "import sys; print('{}.{}.{}'.format(*sys.version_info[:3])); print(getattr(sys, '_base_executable', '') or sys.executable)"
     $probe = Invoke-NativeCommand -Executable $venvPython -Arguments @('-c', $probeCode) -Quiet -NoLog
     if (-not $probe.Succeeded) {
-        throw (".venv exists but its Python could not be started (exit {0}): {1}. Re-run with -ForceRecreateVenv." -f $probe.ExitCode, $venvPython)
+        throw (".venv exists but its Python could not be started (exit {0}): {1}." -f $probe.ExitCode, $venvPython)
     }
 
     $lines = @($probe.StdOut -split "`r?`n" | Where-Object { $_ })
     if ($lines.Count -lt 1) {
-        throw (".venv Python did not report a version: {0}. Re-run with -ForceRecreateVenv." -f $venvPython)
+        throw (".venv Python did not report a version: {0}." -f $venvPython)
     }
 
     $venvVersion = $null
     try {
         $venvVersion = [Version]($lines[0].Trim())
     } catch {
-        throw (".venv Python reported an unparseable version '{0}'. Re-run with -ForceRecreateVenv." -f $lines[0])
+        throw (".venv Python reported an unparseable version '{0}'." -f $lines[0])
     }
 
     if (-not (Test-VersionConstraints -Version $venvVersion -Constraints $Constraints)) {
-        throw (".venv uses Python {0}, which does not satisfy requires-python '{1}'. Re-run with -ForceRecreateVenv." -f $venvVersion, $RequiresPythonRaw)
+        throw (".venv uses Python {0}, which does not satisfy requires-python '{1}'." -f $venvVersion, $RequiresPythonRaw)
     }
 
     if ($RequireSelectedPython -and $SelectedPython -and $SelectedPython.Version) {
         $selectedVersion = [Version]$SelectedPython.Version
         if ($venvVersion.Major -ne $selectedVersion.Major -or $venvVersion.Minor -ne $selectedVersion.Minor) {
-            throw (".venv uses Python {0}, but the requested interpreter is Python {1}. Re-run with -ForceRecreateVenv." -f $venvVersion, $selectedVersion)
+            throw (".venv uses Python {0}, but the requested interpreter is Python {1}." -f $venvVersion, $selectedVersion)
         }
     }
 
     $baseExe = if ($lines.Count -ge 2) { $lines[1].Trim() } else { $venvPython }
     Write-Host ("  Existing .venv Python OK: {0} ({1})" -f $venvVersion, $baseExe) -ForegroundColor DarkGray
+}
+
+<#
+.SYNOPSIS
+    Confirms an existing .venv can be reused, recreating it automatically when it can't.
+
+.DESCRIPTION
+    Wraps Confirm-VenvPythonCompatible. A failure there (missing/broken
+    interpreter, or a venv that no longer satisfies requires-python / the
+    requested interpreter) means reuse is unsafe - rather than aborting setup,
+    this backs up the old .venv (New-VenvBackup) and removes it
+    (Remove-VenvIfExists), using the same backup/restore safety net as an
+    explicit -ForceRecreateVenv run, so the caller can create a fresh .venv.
+
+.OUTPUTS
+    $null when the existing .venv is compatible and should be reused as-is.
+    Otherwise a [pscustomobject] with a BackupPath property (the renamed
+    backup directory, or $null if the backup rename itself failed) signaling
+    the caller must (re)create .venv.
+#>
+function Resolve-VenvReuseOrRecreate {
+    param(
+        [Parameter(Mandatory=$true)][string] $VenvDir,
+        [Parameter(Mandatory=$true)][System.Collections.Generic.List[hashtable]] $Constraints,
+        [Parameter(Mandatory=$true)][string] $RequiresPythonRaw,
+        [Parameter(Mandatory=$true)][object] $SelectedPython,
+        [bool] $RequireSelectedPython = $false,
+        [bool] $NonInteractive = $false
+    )
+
+    try {
+        Confirm-VenvPythonCompatible `
+            -VenvDir               $VenvDir `
+            -Constraints           $Constraints `
+            -RequiresPythonRaw     $RequiresPythonRaw `
+            -SelectedPython        $SelectedPython `
+            -RequireSelectedPython $RequireSelectedPython
+        return $null
+    } catch {
+        Write-Banner ("Existing .venv can't be reused ({0}) - recreating automatically." -f $_.Exception.Message) 'WARN'
+        $backupPath = New-VenvBackup -VenvDir $VenvDir
+        Remove-VenvIfExists -VenvDir $VenvDir -NonInteractive $NonInteractive
+        return [pscustomobject]@{ BackupPath = $backupPath }
+    }
 }
 
 <#
@@ -276,6 +320,7 @@ Export-ModuleMember -Function `
     Remove-VenvIfExists, `
     Confirm-VenvExists, `
     Confirm-VenvPythonCompatible, `
+    Resolve-VenvReuseOrRecreate, `
     Copy-PythonDllToVenv, `
     Write-ProjectPth, `
     Invoke-VenvActivation, `

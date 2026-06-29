@@ -230,14 +230,23 @@ function Invoke-PmPrepareVenv {
                     -VenvDir   $Ctx.VenvDir `
                     -UvExe     $Ctx.UvInfo.Exe
             } else {
-                # .venv-Ordner existiert -> NICHT anfassen, nur später uv sync benutzen
+                # .venv-Ordner existiert -> nur wiederverwenden, wenn kompatibel;
+                # sonst automatisch sichern + neu anlegen (siehe Resolve-VenvReuseOrRecreate)
                 Write-Host ">>> [Invoke-PmPrepareVenv] uv: .venv EXISTS -> reusing, NO 'uv venv'" -ForegroundColor Magenta
-                Confirm-VenvPythonCompatible `
+                $recreate = Resolve-VenvReuseOrRecreate `
                     -VenvDir               $Ctx.VenvDir `
                     -Constraints           $Ctx.ParsedConstraints `
                     -RequiresPythonRaw     $Ctx.RequiresPython `
                     -SelectedPython        $Ctx.SelectedPython `
-                    -RequireSelectedPython ([bool]$Ctx.PythonExePath)
+                    -RequireSelectedPython ([bool]$Ctx.PythonExePath) `
+                    -NonInteractive        ([bool]$Ctx.NonInteractive)
+                if ($recreate) {
+                    $Ctx.VenvBackupPath = $recreate.BackupPath
+                    Invoke-UvVenv `
+                        -PythonExe $Ctx.SelectedPython.Exe `
+                        -VenvDir   $Ctx.VenvDir `
+                        -UvExe     $Ctx.UvInfo.Exe
+                }
             }
         }
         'poetry' {
@@ -249,15 +258,21 @@ function Invoke-PmPrepareVenv {
                 Write-Host ">>> .venv existiert NICHT -> needsCreate = true, 'poetry env use' wird aufgerufen" -ForegroundColor Magenta
                 $needsCreate = $true
             } else {
-                # .venv-Ordner existiert -> immer wiederverwenden, nicht anfassen
+                # .venv-Ordner existiert -> nur wiederverwenden, wenn kompatibel;
+                # sonst automatisch sichern + neu anlegen (siehe Resolve-VenvReuseOrRecreate)
                 Write-Host ">>> .venv EXISTS -> reusing, NO 'poetry env use'" -ForegroundColor Magenta
                 Write-Host ("  Reusing existing virtualenv at {0} (skip 'poetry env use')" -f $venvDir) -ForegroundColor DarkGray
-                Confirm-VenvPythonCompatible `
+                $recreate = Resolve-VenvReuseOrRecreate `
                     -VenvDir               $Ctx.VenvDir `
                     -Constraints           $Ctx.ParsedConstraints `
                     -RequiresPythonRaw     $Ctx.RequiresPython `
                     -SelectedPython        $Ctx.SelectedPython `
-                    -RequireSelectedPython ([bool]$Ctx.PythonExePath)
+                    -RequireSelectedPython ([bool]$Ctx.PythonExePath) `
+                    -NonInteractive        ([bool]$Ctx.NonInteractive)
+                if ($recreate) {
+                    $Ctx.VenvBackupPath = $recreate.BackupPath
+                    $needsCreate = $true
+                }
             }
 
             if ($needsCreate) {

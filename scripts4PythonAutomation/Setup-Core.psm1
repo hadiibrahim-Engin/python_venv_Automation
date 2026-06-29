@@ -463,7 +463,7 @@ function Start-Setup {
             AllowPythonInstall   = $AllowPythonInstall
             UpgradePackages      = $UpgradePackages     # string[]; selective per-package upgrade
             PinExact             = $PinExact            # bool; install exact lock-file versions
-            VenvBackupPath       = $null                # set by New-VenvBackup before step 5b
+            VenvBackupPath       = $null                # set by New-VenvBackup (step 5b) or Resolve-VenvReuseOrRecreate (step 5c)
             PrechecksWouldAbort  = $false
             Mode                 = $Mode
         }

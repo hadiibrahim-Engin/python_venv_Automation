@@ -232,7 +232,7 @@ The setup flow is a fixed pipeline inside `Start-Setup` (unchanged by this distr
 5. Resolve a compatible Python interpreter.
 6. Ensure the package-manager runtime exists.
 7. Configure package-manager defaults and persist installed tool directories on PATH.
-8. Create or refresh `.venv`; validate and copy runtime assets.
+8. Create or refresh `.venv`; validate and copy runtime assets. An existing `.venv` that fails the Python-compatibility check (missing/broken interpreter, or no longer satisfying `requires-python`) is backed up and recreated automatically here — `-ForceRecreateVenv` / `devsetup rebuild` is only needed to force a rebuild of an otherwise-healthy `.venv`.
 9. Sync the lock file or re-resolve dependencies, then install.
 10. Write project wiring (`.pth`, VS Code settings), copy Tcl runtime, and code-sign executables.
 
