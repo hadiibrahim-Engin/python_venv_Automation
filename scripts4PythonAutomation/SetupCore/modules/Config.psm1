@@ -6,6 +6,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$import = 'Microsoft.PowerShell.Core\Import-Module'
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Errors.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
+
 $script:ConfigFileName = '.setup-config.json'
 $script:_configCache = @{}
 
@@ -55,9 +58,15 @@ function Read-SetupConfig {
         return $parsed
     }
     catch {
-        Write-Warning ("[Config] Could not read {0}: {1}" -f $script:ConfigFileName, $_.Exception.Message)
-        $script:_configCache[$key] = $null
-        return $null
+        # A malformed config must not silently fall back to auto-detection:
+        # the file exists precisely because someone pinned a decision, and
+        # quietly ignoring it can select the wrong package manager.
+        throw (New-SetupException `
+            -Message ("{0} is present but could not be parsed: {1}" -f $script:ConfigFileName, $_.Exception.Message) `
+            -ErrorCode 'CONFIG_INVALID' `
+            -Step 'CONFIG' `
+            -Context @{ Path = $path } `
+            -InnerException $_.Exception)
     }
 }
 

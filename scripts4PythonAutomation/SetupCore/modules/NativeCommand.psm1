@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'CommandLog.psm1') -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'CommandLog.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
 
 <#
 .SYNOPSIS

@@ -44,3 +44,24 @@ Describe 'Write-SetupConfig' {
         }
     }
 }
+
+Describe 'Read-SetupConfig fails loudly on a malformed file' {
+    It 'throws CONFIG_INVALID instead of silently falling back to auto-detection' {
+        $root = Join-Path $TestDrive 'badconfig'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root '.setup-config.json') -Value '{ not json' -Encoding UTF8
+        Clear-SetupConfigCache
+
+        $err = $null
+        try { Read-SetupConfig -ProjectRoot $root } catch { $err = $_.Exception }
+        $err | Should -Not -BeNullOrEmpty
+        $err.ErrorCode | Should -Be 'CONFIG_INVALID'
+    }
+
+    It 'returns $null when there is simply no config file' {
+        $root = Join-Path $TestDrive 'noconfig'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Clear-SetupConfigCache
+        Read-SetupConfig -ProjectRoot $root | Should -BeNullOrEmpty
+    }
+}

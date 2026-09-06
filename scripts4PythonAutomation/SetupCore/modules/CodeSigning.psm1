@@ -26,8 +26,8 @@ $ErrorActionPreference = 'Stop'
 #>
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1') -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
 
 $script:CodeSignerDefaults = @{
     DigiCertUtilityExe  = $null

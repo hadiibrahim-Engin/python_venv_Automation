@@ -32,11 +32,11 @@ $ErrorActionPreference = 'Stop'
 #>
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UV.psm1')            -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Poetry.psm1')        -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Venv.psm1')          -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UV.psm1')            -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Poetry.psm1')        -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Venv.psm1')          -Force -DisableNameChecking -Global -ErrorAction Stop
 
 
 # ---------------------------------------------------------------------------

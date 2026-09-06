@@ -102,6 +102,33 @@ function Get-SetupErrorDetails {
 .SYNOPSIS
     Writes an error banner, optionally pauses, then throws.
 #>
+<#
+.SYNOPSIS
+    Returns $true only when a human can actually answer a prompt.
+
+.DESCRIPTION
+    Used to keep error paths from blocking. Every caller of Exit-WithError in
+    Toml/UV/Poetry omits -NonInteractive, so a missing pyproject.toml used to
+    sit on "Press Enter to exit" forever in CI and in any scripted run.
+
+    Set DEVSETUP_NONINTERACTIVE=1 to force the non-interactive answer.
+#>
+function Test-SetupInteractive {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    if ($env:DEVSETUP_NONINTERACTIVE -match '^(1|true|yes|on)$') { return $false }
+    if ($env:CI -match '^(1|true|yes|on)$')             { return $false }
+    if ($env:TF_BUILD -match '^(1|true|yes|on)$')       { return $false }   # Azure Pipelines
+    if ($env:GITHUB_ACTIONS -match '^(1|true|yes|on)$') { return $false }
+
+    try { if (-not [Environment]::UserInteractive) { return $false } } catch { }
+    try { if ([Console]::IsInputRedirected)        { return $false } } catch { }
+
+    return $true
+}
+
 function Exit-WithError {
     param(
         [Parameter(Mandatory=$true)][string] $Message,
@@ -115,7 +142,9 @@ function Exit-WithError {
     $fullMessage = "{0}`nAt: {1}:{2}:{3}`nFunction: {4}" -f $Message, $scriptPath, $line, $col, $cmd
 
     Write-Banner $fullMessage 'ERROR'
-    if (-not $NonInteractive) {
+    # Prompt only when a human is actually there; an unattended run must fail
+    # fast instead of blocking on Read-Host.
+    if (-not $NonInteractive -and (Test-SetupInteractive)) {
         Read-Host "`nPress Enter to exit"
     }
     throw (New-Object System.Exception($fullMessage))

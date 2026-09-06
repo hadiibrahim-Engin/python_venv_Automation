@@ -110,7 +110,8 @@ function New-GitSyncResult {
         [int] $Behind = 0,
         [bool] $Dirty = $false,
         [bool] $Changed = $false,
-        [string] $Message = ''
+        [string] $Message = '',
+        [string] $RecoveryRef = $null
     )
 
     [pscustomobject]@{
@@ -123,7 +124,43 @@ function New-GitSyncResult {
         Dirty          = $Dirty
         Changed        = $Changed
         Message        = $Message
+        RecoveryRef    = $RecoveryRef
     }
+}
+
+<#
+.SYNOPSIS
+    Records the current HEAD under refs/devsetup-backup/<timestamp>.
+
+.DESCRIPTION
+    `git reset --hard` discards local commits and leaves them reachable only
+    through the reflog, which expires. Writing a real ref first makes the
+    pre-reset state recoverable with a plain `git reset --hard <ref>`.
+
+    Returns the ref name, or $null when HEAD could not be resolved. Failing to
+    create the backup ref is fatal: the caller must not perform a destructive
+    reset without a recovery point.
+#>
+function New-GitRecoveryRef {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter()][int] $TimeoutSeconds = 10
+    )
+
+    $headProbe = Invoke-GitProcess -RepositoryPath $RepositoryRoot -Arguments @('rev-parse', 'HEAD') -TimeoutSeconds $TimeoutSeconds -AllowFailure
+    if (-not $headProbe.Succeeded -or [string]::IsNullOrWhiteSpace($headProbe.StdOut)) {
+        return $null
+    }
+    $head = $headProbe.StdOut.Trim()
+
+    $refName = 'refs/devsetup-backup/{0}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+    $update = Invoke-GitProcess -RepositoryPath $RepositoryRoot -Arguments @('update-ref', $refName, $head) -TimeoutSeconds $TimeoutSeconds -AllowFailure
+    if (-not $update.Succeeded) {
+        throw ("GitSync could not create the recovery ref '{0}'; refusing to run a destructive reset." -f $refName)
+    }
+
+    return $refName
 }
 
 function Invoke-SafeGitPull {
@@ -266,15 +303,23 @@ function Invoke-SafeGitPull {
         $action = "git reset --hard $upstream"
         if ($PSCmdlet.ShouldProcess($repoRoot, $action)) {
             Write-Warning ("GitSync: -Force explicitly supplied. Tracked local changes/commits may be discarded by '{0}'." -f $action)
+
+            # Make the pre-reset state recoverable by a real ref, not just the
+            # reflog (which expires). Created before anything destructive runs.
+            $recoveryRef = New-GitRecoveryRef -RepositoryRoot $repoRoot -TimeoutSeconds $TimeoutSeconds
+            if ($recoveryRef) {
+                Write-Warning ("GitSync: previous HEAD saved as '{0}'. Recover with: git reset --hard {0}" -f $recoveryRef)
+            }
+
             Invoke-GitProcess -RepositoryPath $repoRoot -Arguments @('reset', '--hard', $upstream) -TimeoutSeconds $TimeoutSeconds | Out-Null
 
             # Deliberately do not run git clean. Untracked files are user data.
             $postResetStatus = Invoke-GitProcess -RepositoryPath $repoRoot -Arguments @('status', '--porcelain') -TimeoutSeconds $TimeoutSeconds
             if (-not [string]::IsNullOrWhiteSpace($postResetStatus.StdOut)) {
-                throw 'GitSync forced reset completed, but untracked or otherwise outstanding files remain. No git clean was performed; resolve them manually.'
+                throw ("GitSync forced reset completed, but untracked or otherwise outstanding files remain. No git clean was performed; resolve them manually. Previous HEAD is preserved at '{0}'." -f $recoveryRef)
             }
 
-            return New-GitSyncResult -Status 'ForceReset' -RepositoryRoot $repoRoot -Branch $branch -Upstream $upstream -Ahead 0 -Behind 0 -Dirty $false -Changed $true -Message "Repository reset to $upstream."
+            return New-GitSyncResult -Status 'ForceReset' -RepositoryRoot $repoRoot -Branch $branch -Upstream $upstream -Ahead 0 -Behind 0 -Dirty $false -Changed $true -Message "Repository reset to $upstream." -RecoveryRef $recoveryRef
         }
 
         return New-GitSyncResult -Status 'WhatIfForceReset' -RepositoryRoot $repoRoot -Branch $branch -Upstream $upstream -Ahead $ahead -Behind $behind -Dirty $dirty -Changed $false -Message "Would reset repository to $upstream."
@@ -288,4 +333,4 @@ function Invoke-SafeGitPull {
     return New-GitSyncResult -Status 'WhatIfFastForward' -RepositoryRoot $repoRoot -Branch $branch -Upstream $upstream -Ahead $ahead -Behind $behind -Dirty $dirty -Changed $false -Message "Would fast-forward $branch to $upstream."
 }
 
-Export-ModuleMember -Function Invoke-SafeGitPull
+Export-ModuleMember -Function Invoke-SafeGitPull, New-GitRecoveryRef

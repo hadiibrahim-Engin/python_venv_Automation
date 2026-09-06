@@ -25,10 +25,10 @@ $ErrorActionPreference = 'Stop'
 #>
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')     -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Toml.psm1')   -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Config.psm1') -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Errors.psm1')  -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')     -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Toml.psm1')   -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Config.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Errors.psm1')  -Force -DisableNameChecking -Global -ErrorAction Stop
 
 
 # ---------------------------------------------------------------------------

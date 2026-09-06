@@ -18,10 +18,10 @@ $ErrorActionPreference = 'Stop'
 #>
 
 $import = 'Microsoft.PowerShell.Core\Import-Module'
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1')          -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Versioning.psm1')    -Force -DisableNameChecking -ErrorAction Stop
-& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Path.psm1')          -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Versioning.psm1')    -Force -DisableNameChecking -Global -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -Global -ErrorAction Stop
 
 # Compiled once at module load; reused by every version-extraction call.
 # [Compiled] tells .NET to JIT the pattern on first use — measurably faster

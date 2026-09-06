@@ -26,7 +26,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('test', 'info', 'detect', 'pipeline', 'fixtures', 'exec', 'selftest')]
+    [ValidateSet('test', 'info', 'detect', 'pipeline', 'fixtures', 'exec', 'selftest', 'matrix', 'dummy')]
     [string] $Command,
 
     # Project directory for 'detect' / 'pipeline'. Defaults to a generated fixture.
@@ -305,4 +305,6 @@ switch ($Command) {
     'fixtures' { New-DriverFixtures -Root $WorkDir | ForEach-Object { Write-Host "Fixtures in $_" } }
     'exec'     { Invoke-DriverExec }
     'selftest' { Invoke-DriverSelfTest }
+    'dummy'    { & (Join-Path $RepoRoot 'tests/dummy/New-DummyProject.ps1') -Root (Join-Path $WorkDir 'dummy') }
+    'matrix'   { & (Join-Path $RepoRoot 'tests/dummy/Invoke-FeatureMatrix.ps1') -Root (Join-Path $WorkDir 'dummy') }
 }
