@@ -36,12 +36,30 @@ Describe 'Public command surface' {
         Get-Command $_ -Module $ModuleName -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
     }
 
-    It 'does not export private helper <_>' -ForEach @('Get-DevSetupCommandName', 'New-DevSetupShim', 'Get-DevSetupRuntimeConfig', 'Test-PythonVenvAutomationVersion', 'Update-PythonVenvAutomationIfNeeded') {
+    It 'does not export private helper <_>' -ForEach @('Get-DevSetupCommandName', 'New-DevSetupShim', 'Get-DevSetupRuntimeConfig', 'Test-PythonVenvAutomationVersion', 'Update-PythonVenvAutomationIfNeeded', 'Assert-DevSetupEngine') {
         Get-Command $_ -Module $ModuleName -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
-    It 'exports exactly four public functions' {
-        (Get-Command -Module $ModuleName -CommandType Function).Count | Should -Be 4
+    It 'exports exactly the documented public surface' {
+        # Asserting the set (not just a count) so an accidental export is named.
+        $expected = @(
+            'Get-DevSetupAbout'
+            'Get-PythonVenvSetupInfo'
+            'Install-DevSetupCommand'
+            'Invoke-DevSetupDoctor'
+            'Invoke-DevSetupRepairCommand'
+            'Invoke-PythonVenvSetup'
+            'New-DevSetupSupport'
+            'Update-PythonVenvAutomation'
+        )
+        $actual = (Get-Command -Module $ModuleName -CommandType Function | ForEach-Object Name) | Sort-Object
+        ($actual -join ',') | Should -Be (($expected | Sort-Object) -join ',')
+    }
+
+    It 'keeps the manifest FunctionsToExport in sync with the module' {
+        $manifest = Import-PowerShellDataFile (Join-Path $RepoRoot 'PythonVenvAutomation/PythonVenvAutomation.psd1')
+        $actual = (Get-Command -Module $ModuleName -CommandType Function | ForEach-Object Name) | Sort-Object
+        (($manifest.FunctionsToExport | Sort-Object) -join ',') | Should -Be ($actual -join ',')
     }
 }
 

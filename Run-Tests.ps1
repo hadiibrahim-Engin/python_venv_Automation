@@ -40,7 +40,13 @@ if (-not $NoCoverage) {
         (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Logging.psm1'),
         (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Config.psm1'),
         (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Detection.psm1'),
-        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\SetupPipeline.psm1')
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\SetupPipeline.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Versioning.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\TomlParser.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\PyProjectHealth.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Redaction.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\SupportCodes.psm1'),
+        (Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\Diagnostics.psm1')
     )
     $config.CodeCoverage.OutputPath = Join-Path $repoRoot 'coverage.xml'
     $config.CodeCoverage.OutputFormat = 'JaCoCo'

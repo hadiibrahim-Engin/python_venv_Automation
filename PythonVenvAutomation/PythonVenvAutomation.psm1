@@ -79,5 +79,9 @@ Export-ModuleMember -Function @(
     'Invoke-PythonVenvSetup',
     'Install-DevSetupCommand',
     'Update-PythonVenvAutomation',
-    'Get-PythonVenvSetupInfo'
+    'Get-PythonVenvSetupInfo',
+    'Invoke-DevSetupDoctor',
+    'Invoke-DevSetupRepairCommand',
+    'Get-DevSetupAbout',
+    'New-DevSetupSupport'
 )

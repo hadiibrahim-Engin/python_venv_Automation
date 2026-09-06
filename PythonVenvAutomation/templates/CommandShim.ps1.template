@@ -58,6 +58,11 @@ function Show-DevSetupShimHelp {
         "  $c self-update"
         "  $c help"
         ''
+        "  $c doctor"
+        "  $c repair"
+        "  $c about"
+        "  $c support"
+        ''
         'Advanced:'
         "  $c -- -PackageManager uv -NonInteractive"
         "  $c update -- -UpgradePackage requests"
@@ -71,6 +76,10 @@ function Show-DevSetupShimHelp {
         ''
         'Commands:'
         "  setup        Run full setup. Same as $c."
+        '  doctor       Check everything and change nothing.'
+        '  repair       Apply only the repairs that are safe.'
+        '  about        Show version, install path and project status.'
+        '  support      Create a support bundle (contains no credentials).'
         '  update       Refresh existing .venv without reinstalling tools.'
         '  upgrade      Refresh existing .venv and intentionally upgrade dependencies.'
         '  rebuild      Remove and recreate .venv.'
@@ -95,7 +104,10 @@ $alreadyRelaunched = Test-Path "env:$relaunchEnv"
 
 # 'self-update' is handled by the module itself; everything else gets the
 # transparent pre-import check unless the user opted out for this invocation.
-$runAutoCheck = (-not $noSelfUpdate) -and (-not $alreadyRelaunched) -and ($command -ne 'self-update')
+# 'doctor', 'about' and 'support' are diagnostics: they must report the state
+# the user actually has, so they never trigger an update first.
+$readOnlyCommands = @('self-update', 'doctor', 'about', 'support')
+$runAutoCheck = (-not $noSelfUpdate) -and (-not $alreadyRelaunched) -and ($readOnlyCommands -notcontains $command)
 
 if ($runAutoCheck) {
     if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
@@ -140,6 +152,10 @@ try {
         'setup'       { Invoke-PythonVenvSetup @passthrough }
         'update'      { Invoke-PythonVenvSetup -Mode update-venv @passthrough }
         'upgrade'     { Invoke-PythonVenvSetup -Mode update-venv -UpdateDependencies @passthrough }
+        'doctor'      { Invoke-DevSetupDoctor @passthrough }
+        'repair'      { Invoke-DevSetupRepairCommand @passthrough }
+        'about'       { Get-DevSetupAbout @passthrough }
+        'support'     { New-DevSetupSupport @passthrough }
         'rebuild'     { Invoke-PythonVenvSetup -ForceRecreateVenv @passthrough }
         'dry'         { Invoke-PythonVenvSetup -DryRun @passthrough }
         'prod'        { Invoke-PythonVenvSetup -ExcludeDev @passthrough }

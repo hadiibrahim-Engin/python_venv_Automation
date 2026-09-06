@@ -475,6 +475,105 @@ print(d['project']['version'] + '|' + d['tool']['poetry']['version'])
 }
 
 # ---------------------------------------------------------------------------
+# 9b. User commands (Parts R / S / T / U / V)
+# ---------------------------------------------------------------------------
+Set-Group 'User commands (Parts R-V)'
+
+$cmdRoot = Join-Path $Root 'commands'
+if (Test-Path -LiteralPath $cmdRoot) { Remove-Item -LiteralPath $cmdRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $cmdRoot -Force | Out-Null
+@"
+[project]
+name = "cmddemo"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31", "Requests"]
+
+[tool.uv]
+dev-dependencies = ["pytest"]
+"@ | Set-Content -LiteralPath (Join-Path $cmdRoot 'pyproject.toml') -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $cmdRoot 'uv.lock') -Value 'lock' -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $cmdRoot '.setup-config.json') -Encoding UTF8 `
+    -Value '{"PackageManager":"uv","AZURE_PAT":"supersecrettoken123"}'
+
+function Get-CmdTreeHash {
+    param([string] $Path)
+    (Get-ChildItem -LiteralPath $Path -Recurse -Force -File | Sort-Object FullName |
+        ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ''
+}
+
+Test-Feature -Name 'doctor produces a report' -Expected 'True' -Actual {
+    Clear-PyProjectHealthCache
+    $script:doctorReport = Get-DevSetupDoctorReport -ProjectRoot $cmdRoot
+    [string]($script:doctorReport.Checks.Count -gt 5)
+}
+
+Test-Feature -Name 'doctor changes nothing on disk' -Expected 'True' -Actual {
+    $before = Get-CmdTreeHash -Path $cmdRoot
+    Clear-PyProjectHealthCache
+    Get-DevSetupDoctorReport -ProjectRoot $cmdRoot | Out-Null
+    Get-DevSetupDoctorReport -ProjectRoot $cmdRoot | Out-Null
+    [string]($before -eq (Get-CmdTreeHash -Path $cmdRoot))
+}
+
+Test-Feature -Name 'doctor output has no internal module names' -Expected 'True' -Actual {
+    $text = Format-DevSetupDoctorReport -Report $script:doctorReport
+    [string](-not ($text -match 'psm1' -or $text -match 'StackTrace'))
+}
+
+Test-Feature -Name 'repair -WhatIf changes nothing' -Expected 'True' -Actual {
+    $before = Get-CmdTreeHash -Path $cmdRoot
+    Invoke-DevSetupRepair -ProjectRoot $cmdRoot -WhatIf | Out-Null
+    [string]($before -eq (Get-CmdTreeHash -Path $cmdRoot))
+}
+
+Test-Feature -Name 'repair applies only the safe fixes' -Expected 'PYPROJECT_DUPLICATE_DEPENDENCY,PYPROJECT_LEGACY_UV_DEV_DEPENDENCIES' -Actual {
+    $r = Invoke-DevSetupRepair -ProjectRoot $cmdRoot -Confirm:$false
+    ($r.Applied | ForEach-Object Code) -join ','
+}
+
+Test-Feature -Name 'repair fails closed on an outstanding decision (CI)' -Expected 'False' -Actual {
+    $amb = Join-Path $Root 'commands-ambiguous'
+    if (Test-Path -LiteralPath $amb) { Remove-Item -LiteralPath $amb -Recurse -Force }
+    New-Item -ItemType Directory -Path $amb -Force | Out-Null
+    "[project]`nname = `"x`"`nversion = `"1.0.0`"`nrequires-python = `">=3.11`"`n" |
+        Set-Content -LiteralPath (Join-Path $amb 'pyproject.toml') -Encoding UTF8
+    Clear-PyProjectHealthCache
+    [string](Invoke-DevSetupRepair -ProjectRoot $amb -NonInteractive -Confirm:$false).Succeeded
+}
+
+Test-Feature -Name 'support bundle is created' -Expected 'True' -Actual {
+    $log = Join-Path $cmdRoot 'run.ndjson'
+    '{"url":"https://user:PATSECRET99@dev.azure.com/org","token":"tok-abc-123"}' |
+        Set-Content -LiteralPath $log -Encoding UTF8
+    $script:bundle = New-DevSetupSupportBundle -ProjectRoot $cmdRoot -OutputDirectory (Join-Path $Root 'bundles') -LogPath $log -Confirm:$false
+    [string]($script:bundle.Created -and (Test-Path -LiteralPath $script:bundle.ZipPath))
+}
+
+Test-Feature -Name 'support bundle contains no secrets' -Expected 'True' -Actual {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($script:bundle.ZipPath)
+    try {
+        $all = foreach ($entry in $zip.Entries) {
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try { $reader.ReadToEnd() } finally { $reader.Dispose() }
+        }
+        $joined = $all -join "`n"
+        [string](-not ($joined -match 'supersecrettoken123' -or $joined -match 'PATSECRET99' -or $joined -match 'tok-abc-123'))
+    } finally { $zip.Dispose() }
+}
+
+Test-Feature -Name 'support codes map to stable DS- identifiers' -Expected 'DS-P204,DS-P202,DS-X901' -Actual {
+    @('PYPROJECT_PM_AMBIGUOUS', 'PYTHON_CONSTRAINT_UNSUPPORTED', 'TOTALLY_UNKNOWN') |
+        ForEach-Object { Get-DevSetupSupportCode -ErrorCode $_ } | Join-String -Separator ','
+}
+
+Test-Feature -Name 'user-facing error hides technical detail' -Expected 'True' -Actual {
+    $text = Format-DevSetupUserError -ErrorCode 'TOML_PARSE_ERROR'
+    [string](($text -match 'DS-P201') -and -not ($text -match 'Exception' -or $text -match 'psm1'))
+}
+
+# ---------------------------------------------------------------------------
 # 10. Platform-gated features
 # ---------------------------------------------------------------------------
 Set-Group 'Platform-gated features'

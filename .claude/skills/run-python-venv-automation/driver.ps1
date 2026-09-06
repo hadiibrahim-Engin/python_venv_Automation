@@ -191,8 +191,12 @@ function Invoke-DriverTest {
     if (-not $NoCoverage) {
         $config.CodeCoverage.Enabled = $true
         $config.CodeCoverage.CoveragePercentTarget = 70
-        $config.CodeCoverage.Path = @('Constants', 'Errors', 'Logging', 'Config', 'Detection', 'SetupPipeline') |
-            ForEach-Object { Join-Path $ModulesDir ("{0}.psm1" -f $_) }
+        # Same deterministic-core set as Run-Tests.ps1, so the local number
+        # matches what the CI gate will report.
+        $config.CodeCoverage.Path = @(
+            'Constants', 'Errors', 'Logging', 'Config', 'Detection', 'SetupPipeline',
+            'Versioning', 'TomlParser', 'PyProjectHealth', 'Redaction', 'SupportCodes', 'Diagnostics'
+        ) | ForEach-Object { Join-Path $ModulesDir ("{0}.psm1" -f $_) }
         $config.CodeCoverage.OutputPath = Join-Path $RepoRoot 'coverage.xml'
         $config.CodeCoverage.OutputFormat = 'JaCoCo'
     }
