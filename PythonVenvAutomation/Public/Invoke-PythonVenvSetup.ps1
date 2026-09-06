@@ -5,22 +5,39 @@ function Invoke-PythonVenvSetup {
 
     .DESCRIPTION
         Preserves the full option surface of the legacy setup-core.ps1 and the
-        existing setup behavior. It performs the same argument normalization the
-        old entry point did (boolean coercion, non-interactive/CI resolution,
-        -UpgradePackage parsing) and then calls Start-Setup. The setup pipeline
-        itself is unchanged.
+        existing setup behavior. It performs argument normalization, optionally
+        performs a safe Git synchronization before setup, and then calls
+        Start-Setup.
+
+        Git synchronization is conservative by default: dirty repositories are
+        skipped, only fast-forward pulls are allowed, and destructive reset is
+        only possible with the explicit -ForceGitPull switch.
 
         ProjectRoot defaults to the current directory, which is the project the
         user wants to set up when invoking the global command.
 
+    .PARAMETER SkipGitPull
+        Disables the pre-setup Git synchronization for this run, regardless of
+        the project config.
+
+    .PARAMETER ForceGitPull
+        Explicitly allows GitSync to reset tracked local changes/commits to the
+        configured upstream. This is the only path that enables destructive
+        Git alignment. Untracked files are never deleted automatically.
+
     .EXAMPLE
         Invoke-PythonVenvSetup
+
     .EXAMPLE
         Invoke-PythonVenvSetup -Mode update-venv
+
     .EXAMPLE
         Invoke-PythonVenvSetup -DryRun -PackageManager uv
+
+    .EXAMPLE
+        Invoke-PythonVenvSetup -ForceGitPull -Confirm
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
         [Parameter()]
         [string] $ProjectRoot,
@@ -92,7 +109,13 @@ function Invoke-PythonVenvSetup {
         [string] $UpgradePackage = '',
 
         [Parameter()]
-        [switch] $UnblockScripts
+        [switch] $UnblockScripts,
+
+        [Parameter()]
+        [switch] $SkipGitPull,
+
+        [Parameter()]
+        [switch] $ForceGitPull
     )
 
     Set-StrictMode -Version Latest
@@ -104,6 +127,10 @@ function Invoke-PythonVenvSetup {
 
     # --- Resolve project root (defaults to the caller's current directory) ---
     if (-not $ProjectRoot) { $ProjectRoot = (Get-Location).Path }
+    if (-not (Test-Path -LiteralPath $ProjectRoot -PathType Container)) {
+        throw "Project root does not exist: $ProjectRoot"
+    }
+    $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 
     # --- Normalize arguments (ports the legacy setup-core.ps1 logic) ---------
     $resolvedPythonExePath  = if ($PSBoundParameters.ContainsKey('PythonExePath')) { $PythonExePath } else { $null }
@@ -130,6 +157,80 @@ function Invoke-PythonVenvSetup {
             Get-ChildItem -Path $root -Recurse -Include '*.ps1', '*.psm1', '*.psd1' -ErrorAction SilentlyContinue |
                 ForEach-Object { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
         }
+    }
+
+    # -----------------------------------------------------------------------
+    # PHASE 1 / STEP 0: safe Git synchronization.
+    #
+    # Backward compatibility note: this repository already uses
+    # `.setup-config.json` (dash), so the new keys are added to that file rather
+    # than introducing the requested `.setup.config.json` spelling and silently
+    # splitting configuration across two files.
+    # -----------------------------------------------------------------------
+    $autoGitPull = $true
+    $gitPullStrategy = 'SkipIfDirty'
+    $setupConfigPath = Join-Path $ProjectRoot '.setup-config.json'
+
+    if (Test-Path -LiteralPath $setupConfigPath -PathType Leaf) {
+        try {
+            $setupConfig = Get-Content -LiteralPath $setupConfigPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+            if ($setupConfig.PSObject.Properties.Name -contains 'AutoGitPull') {
+                if ($setupConfig.AutoGitPull -isnot [bool]) {
+                    throw "AutoGitPull must be a JSON boolean (true/false), not '$($setupConfig.AutoGitPull)'."
+                }
+                $autoGitPull = [bool]$setupConfig.AutoGitPull
+            }
+
+            if ($setupConfig.PSObject.Properties.Name -contains 'GitPullStrategy' -and $setupConfig.GitPullStrategy) {
+                $strategyText = ([string]$setupConfig.GitPullStrategy).Trim()
+                if ($strategyText.Length -gt 32) {
+                    throw 'GitPullStrategy exceeds the maximum allowed length of 32 characters.'
+                }
+                switch ($strategyText.ToLowerInvariant()) {
+                    'skipifdirty'  { $gitPullStrategy = 'SkipIfDirty' }
+                    'errorifdirty' { $gitPullStrategy = 'ErrorIfDirty' }
+                    default {
+                        throw "Invalid GitPullStrategy '$strategyText'. Allowed values: SkipIfDirty, ErrorIfDirty."
+                    }
+                }
+            }
+        }
+        catch {
+            throw "Invalid .setup-config.json Git synchronization configuration: $($_.Exception.Message)"
+        }
+    }
+
+    if ($SkipGitPull) { $autoGitPull = $false }
+
+    if ($autoGitPull -or $ForceGitPull) {
+        $engineRoot = Split-Path -Parent $Script:PythonVenvAutomationEnginePath
+        $gitSyncCandidates = @(
+            (Join-Path $engineRoot 'SetupCore\modules\GitSync.psm1'),
+            (Join-Path $engineRoot 'modules\GitSync.psm1')
+        )
+        $gitSyncModule = $gitSyncCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if (-not $gitSyncModule) {
+            throw "Git synchronization is enabled, but GitSync.psm1 could not be found next to the setup engine. Checked: $($gitSyncCandidates -join ', ')"
+        }
+
+        Microsoft.PowerShell.Core\Import-Module -FullyQualifiedName $gitSyncModule -Force -DisableNameChecking -Global -ErrorAction Stop
+
+        $skipIfDirty = ($gitPullStrategy -eq 'SkipIfDirty')
+        $gitParams = @{
+            RepositoryPath = $ProjectRoot
+            SkipIfDirty    = $skipIfDirty
+            Force          = [bool]$ForceGitPull
+            TimeoutSeconds = 10
+            WhatIf         = [bool]$DryRun
+        }
+        if ($PSBoundParameters.ContainsKey('Confirm')) {
+            $gitParams.Confirm = [bool]$PSBoundParameters['Confirm']
+        }
+
+        $gitResult = Invoke-SafeGitPull @gitParams
+        Write-Verbose ("GitSync result: status={0}; branch={1}; upstream={2}; ahead={3}; behind={4}; dirty={5}" -f
+            $gitResult.Status, $gitResult.Branch, $gitResult.Upstream, $gitResult.Ahead, $gitResult.Behind, $gitResult.Dirty)
     }
 
     $setupParams = @{
@@ -163,7 +264,7 @@ function Invoke-PythonVenvSetup {
 function Convert-DevSetupBool {
     <#
     .SYNOPSIS
-        Coerces user-supplied boolean-ish values (ported from setup-core.ps1).
+        Coerces user-supplied boolean-ish values without evaluating regex input.
     #>
     [CmdletBinding()]
     param(
@@ -176,10 +277,23 @@ function Convert-DevSetupBool {
         if ($Value -eq 0) { return $false }
         if ($Value -eq 1) { return $true }
     }
+
     $text = ([string]$Value).Trim()
-    switch -Regex ($text) {
-        '^(true|1|yes|on)$'  { return $true }
-        '^(false|0|no|off)$' { return $false }
+    if ($text.Length -gt 10) {
+        throw ("Invalid boolean value for -{0}: input is longer than 10 characters." -f $Name)
     }
-    throw ("Invalid boolean value for -{0}: '{1}'. Use true/false, 1/0, yes/no, or on/off." -f $Name, $Value)
+
+    switch ($text.ToLowerInvariant()) {
+        'true'  { return $true }
+        '1'     { return $true }
+        'yes'   { return $true }
+        'on'    { return $true }
+        'false' { return $false }
+        '0'     { return $false }
+        'no'    { return $false }
+        'off'   { return $false }
+        default {
+            throw ("Invalid boolean value for -{0}: '{1}'. Use true/false, 1/0, yes/no, or on/off." -f $Name, $Value)
+        }
+    }
 }
