@@ -28,7 +28,7 @@ Describe 'Generated shim names derive from the command name' {
         Remove-Item -LiteralPath $BinDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    It 'uses <CommandName>.ps1 and <CommandName>.cmd for the default name' {
+    It 'uses devsetup.ps1 and devsetup.cmd for the default name' {
         $r = InModuleScope PythonVenvAutomation -Parameters @{ Bin = $BinDir } {
             param($Bin) New-DevSetupShim -BinDirectory $Bin -Force
         }
@@ -82,7 +82,6 @@ Describe 'Installer output uses the configured command name' {
             ($out -join "`n") | Should -Match 'envctl'
         } finally {
             Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-            # Restore default for other tests in the same run.
             InModuleScope PythonVenvAutomation { $Script:DevSetupCommandName = 'devsetup' }
         }
     }
