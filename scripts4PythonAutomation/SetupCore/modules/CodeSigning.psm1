@@ -1,109 +1,178 @@
 #Requires -Version 5.1
 # =============================================================================
 # Module  : CodeSigning.psm1
-#
-# Author  : Hadi Ibrahim
+# Purpose : Idempotent DigiCert-backed Authenticode signing helpers.
 # =============================================================================
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 <#
 .SYNOPSIS
-    Modular code-signing helpers for executables (DigiCertUtil.exe).
+    Modular code-signing helpers for executables and DLLs.
 
 .DESCRIPTION
-    Provides:
-      - Set-CodeSignerDefaults / Get-CodeSignerDefaults: session-wide defaults for DigiCertUtil path and mode.
-      - Invoke-CodeSigner: low-level DigiCertUtil.exe invoker.
-      - Set-CodeSignature: batch-first then per-file fallback with optional verification.
-      - Invoke-DigiCertSigning: simple global entry point (path/dir expansion).
-      - Get-ExecutableTargets, Set-VenvScriptSignature, Set-PoetryShimSignature: convenience helpers.
+    Signing is intentionally idempotent. Before DigiCert is invoked, every
+    target is inspected with Get-AuthenticodeSignature.
 
-    Depends on:
-      - UI.psm1 (Write-Banner)
-      - NativeCommand.psm1 (Invoke-NativeCommand)
+    Files whose Authenticode status is already Valid are preserved and skipped.
+    New, unsigned, changed, hash-mismatched, or otherwise non-valid files are
+    sent to DigiCert. This prevents every setup/update run from re-signing an
+    already healthy .venv.
+
+    A valid third-party/vendor signature is also preserved. This is deliberate:
+    the setup automation must not replace a valid upstream signature merely to
+    stamp the file again. If a future policy requires a specific company signer,
+    that should be implemented as an explicit signer-thumbprint policy.
 #>
 
-# Bring in shared helpers
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1') -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
-# Session-wide defaults for the signer
 $script:CodeSignerDefaults = @{
-    DigiCertUtilityExe   = $null
-    KernelDriverSigning  = $false
+    DigiCertUtilityExe  = $null
+    KernelDriverSigning = $false
 }
 
+function New-CodeSigningResult {
+    param(
+        [int] $Total = 0,
+        [int] $Signed = 0,
+        [int] $NewlySigned = 0,
+        [int] $Skipped = 0,
+        [string[]] $SkippedFiles = @(),
+        [string[]] $Failed = @(),
+        [int] $Pending = 0,
+        [bool] $ForceResign = $false
+    )
+
+    [pscustomobject]@{
+        # Backward-compatible meaning for existing callers:
+        # Signed = files that are in a valid signed state after this operation.
+        Total        = $Total
+        Signed       = $Signed
+        NewlySigned  = $NewlySigned
+        Skipped      = $Skipped
+        SkippedFiles = @($SkippedFiles)
+        Failed       = @($Failed)
+        Pending      = $Pending
+        ForceResign  = $ForceResign
+    }
+}
+
+function Set-CodeSignerDefaults {
 <#
 .SYNOPSIS
     Sets session-wide defaults for DigiCert signing.
 
-.PARAMETER DigiCertUtilityExe
-    Full path to DigiCertUtil.exe.
-
-.PARAMETER KernelDriverSigning
-    Default: $false (normal code signing). Set $true if you need /kernelDriverSigning by default.
+.EXAMPLE
+    Set-CodeSignerDefaults -DigiCertUtilityExe $env:DIGICERT_UTILITY_EXE
 #>
-function Set-CodeSignerDefaults {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)][string] $DigiCertUtilityExe,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $DigiCertUtilityExe,
+
         [bool] $KernelDriverSigning = $false
     )
+
     $normalizedExe = [System.IO.Path]::GetFullPath($DigiCertUtilityExe)
     if (-not (Test-Path -LiteralPath $normalizedExe -PathType Leaf)) {
         throw ("DigiCert Utility not found at: {0}" -f $normalizedExe)
     }
-    $resolved = $normalizedExe
-    $script:CodeSignerDefaults.DigiCertUtilityExe  = $resolved
+
+    $script:CodeSignerDefaults.DigiCertUtilityExe  = $normalizedExe
     $script:CodeSignerDefaults.KernelDriverSigning = $KernelDriverSigning
 }
 
+function Get-CodeSignerDefaults {
 <#
 .SYNOPSIS
     Gets the current session-wide DigiCert signing defaults.
-
-.OUTPUTS
-    PSCustomObject with DigiCertUtilityExe and KernelDriverSigning.
 #>
-function Get-CodeSignerDefaults {
     [CmdletBinding()]
     param()
+
     [pscustomobject]@{
         DigiCertUtilityExe  = $script:CodeSignerDefaults.DigiCertUtilityExe
         KernelDriverSigning = $script:CodeSignerDefaults.KernelDriverSigning
     }
 }
 
+function Get-CodeSignatureState {
+<#
+.SYNOPSIS
+    Inspects the current Authenticode state of one file.
+
+.DESCRIPTION
+    A file is considered reusable when Get-AuthenticodeSignature returns
+    Status=Valid. Any other status means the file is a candidate for signing.
+    Inspection errors are treated as non-valid so the caller can attempt a
+    repair/sign operation instead of silently skipping the file.
+
+.EXAMPLE
+    Get-CodeSignatureState -FilePath '.\.venv\Scripts\tool.exe'
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $FilePath
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw "Signature target does not exist: $FilePath"
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $FilePath).Path
+
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $resolved -ErrorAction Stop
+        $status = [string]$sig.Status
+
+        return [pscustomobject]@{
+            Path                   = $resolved
+            Status                 = $status
+            IsValid                = ($status -eq 'Valid')
+            StatusMessage          = [string]$sig.StatusMessage
+            SignerCertificate      = $sig.SignerCertificate
+            TimeStamperCertificate = $sig.TimeStamperCertificate
+            InspectionError        = $null
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Path                   = $resolved
+            Status                 = 'InspectionError'
+            IsValid                = $false
+            StatusMessage          = $_.Exception.Message
+            SignerCertificate      = $null
+            TimeStamperCertificate = $null
+            InspectionError        = $_.Exception.Message
+        }
+    }
+}
+
+function Invoke-CodeSigner {
 <#
 .SYNOPSIS
     Executes DigiCertUtil.exe sign for one or many files.
 
 .DESCRIPTION
-    Builds the special single-argument file list separated by '*' per DigiCertUtil.exe requirements
-    and invokes the signer via Invoke-NativeCommand. Does not perform fallback or file discovery.
-
-.PARAMETER DigiCertUtilityExe
-    Full path to DigiCertUtil.exe.
-
-.PARAMETER Files
-    One or more file paths to sign.
-
-.PARAMETER KernelDriverSigning
-    When specified, adds /kernelDriverSigning to the signer arguments.
-
-.PARAMETER Quiet
-    Suppress mirrored stdout/stderr from the signer.
-
-.OUTPUTS
-    PSCustomObject with ExitCode, Succeeded, StdOut, StdErr, ErrorText.
+    Low-level DigiCert invocation. Higher-level functions should normally call
+    Set-CodeSignature so already-valid signatures are filtered first.
 #>
-function Invoke-CodeSigner {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)][string]   $DigiCertUtilityExe,
-        [Parameter(Mandatory=$true)][string[]] $Files,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $DigiCertUtilityExe,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string[]] $Files,
+
         [switch] $KernelDriverSigning,
         [switch] $Quiet
     )
@@ -112,7 +181,13 @@ function Invoke-CodeSigner {
         throw ("DigiCert Utility not found at: {0}" -f $DigiCertUtilityExe)
     }
 
-    $existing = @($Files | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
+    $existing = @(
+        $Files |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            ForEach-Object { (Resolve-Path -LiteralPath $_).Path } |
+            Select-Object -Unique
+    )
+
     if ($existing.Count -eq 0) {
         return [pscustomobject]@{
             ExitCode  = 0
@@ -123,7 +198,7 @@ function Invoke-CodeSigner {
         }
     }
 
-    $fileList = ($existing | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }) -join '*'
+    $fileList = $existing -join '*'
     $args = @('sign', '/noInput')
     if ($KernelDriverSigning) { $args += '/kernelDriverSigning' }
     $args += $fileList
@@ -136,173 +211,270 @@ function Invoke-CodeSigner {
     Invoke-NativeCommand -Executable $DigiCertUtilityExe -Arguments $args -Quiet:$Quiet
 }
 
+function Set-CodeSignature {
 <#
 .SYNOPSIS
-    Signs a set of files with batch-first then per-file fallback.
+    Ensures a set of files has valid Authenticode signatures.
 
-.PARAMETER DigiCertUtilityExe
-    Full path to DigiCertUtil.exe. Optional - falls back to the value set via
-    Set-CodeSignerDefaults.
+.DESCRIPTION
+    This is the central idempotent signing function.
 
-.PARAMETER Files
-    Paths to files to sign.
+    1. Every file is inspected with Get-AuthenticodeSignature.
+    2. Status=Valid files are skipped by default.
+    3. Only unsigned/non-valid files are passed to DigiCert.
+    4. Batch signing is attempted first, with per-file fallback on failure.
+    5. -ForceResign bypasses the skip optimization when an explicit re-sign is
+       required by an operator.
 
-.PARAMETER KernelDriverSigning
-    Include /kernelDriverSigning in the signer arguments (default: $false).
-    Only enable this when signing actual kernel drivers, not regular .exe files.
+    If a previously signed file is modified, Authenticode validation no longer
+    returns Valid, so it automatically becomes a signing candidate again.
 
 .PARAMETER Verify
-    If set, validates signatures with Get-AuthenticodeSignature and treats non-Valid as failure.
+    Verify newly signed files with Get-AuthenticodeSignature after signing.
+
+.PARAMETER ForceResign
+    Explicitly re-sign files even when their current signature is Valid.
 
 .OUTPUTS
-    PSCustomObject with Total, Signed, Failed.
+    PSCustomObject with Total, Signed, NewlySigned, Skipped, SkippedFiles,
+    Failed, Pending, and ForceResign.
+
+.EXAMPLE
+    Set-CodeSignature -Files $targets -Verify
+
+.EXAMPLE
+    Set-CodeSignature -Files $targets -ForceResign -Confirm
 #>
-function Set-CodeSignature {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [string]   $DigiCertUtilityExe,
-        [Parameter(Mandatory=$true)][string[]] $Files,
-        [bool]   $KernelDriverSigning = $false,
+        [string] $DigiCertUtilityExe,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string[]] $Files,
+
+        [bool] $KernelDriverSigning = $false,
         [switch] $Verify,
-        [switch] $Quiet
+        [switch] $Quiet,
+        [switch] $ForceResign
     )
 
-    if (-not $DigiCertUtilityExe) { $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe }
+    if (-not $DigiCertUtilityExe) {
+        $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe
+    }
     if (-not $DigiCertUtilityExe) {
         throw 'DigiCertUtilityExe not provided and no default set. Call Set-CodeSignerDefaults first or pass -DigiCertUtilityExe.'
     }
 
-    $targets = $Files | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique
-    $targets = @($targets)
+    $targets = @(
+        $Files |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            ForEach-Object { (Resolve-Path -LiteralPath $_).Path } |
+            Select-Object -Unique
+    )
+
     if ($targets.Count -eq 0) {
         Write-Host 'No files to sign.' -ForegroundColor Yellow
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        return New-CodeSigningResult
     }
 
-    Write-Host ("Signing {0} file(s) ..." -f $targets.Count) -ForegroundColor Cyan
-    if (-not $Quiet) {
-        foreach ($t in $targets) {
-            Write-Host ("  -> {0}" -f $t) -ForegroundColor DarkGray
+    $alreadyValid = New-Object System.Collections.Generic.List[string]
+    $pending      = New-Object System.Collections.Generic.List[string]
+
+    foreach ($target in $targets) {
+        if ($ForceResign) {
+            $pending.Add($target)
+            continue
+        }
+
+        $state = Get-CodeSignatureState -FilePath $target
+        if ($state.IsValid) {
+            $alreadyValid.Add($target)
+            if (-not $Quiet) {
+                $subject = if ($state.SignerCertificate) { $state.SignerCertificate.Subject } else { '<unknown signer>' }
+                Write-Host ("  [SKIP] Valid signature: {0} ({1})" -f (Split-Path $target -Leaf), $subject) -ForegroundColor DarkGreen
+            }
+        }
+        else {
+            $pending.Add($target)
+            if (-not $Quiet) {
+                Write-Host ("  [SIGN] {0} - signature status: {1}" -f (Split-Path $target -Leaf), $state.Status) -ForegroundColor DarkYellow
+            }
         }
     }
 
-    $failures = New-Object System.Collections.ArrayList
-    $signed   = 0
+    if ($pending.Count -eq 0) {
+        if (-not $Quiet) {
+            Write-Banner ("Signing skipped: all {0} target(s) already have valid Authenticode signatures." -f $targets.Count) 'SUCCESS'
+        }
+
+        return New-CodeSigningResult `
+            -Total $targets.Count `
+            -Signed $alreadyValid.Count `
+            -NewlySigned 0 `
+            -Skipped $alreadyValid.Count `
+            -SkippedFiles @($alreadyValid) `
+            -Pending 0 `
+            -ForceResign ([bool]$ForceResign)
+    }
+
+    Write-Host ("Code-signing scan: total={0}, already-valid={1}, needs-signing={2}" -f $targets.Count, $alreadyValid.Count, $pending.Count) -ForegroundColor Cyan
+
+    if (-not $PSCmdlet.ShouldProcess(("{0} file(s)" -f $pending.Count), 'Sign with DigiCert Utility')) {
+        return New-CodeSigningResult `
+            -Total $targets.Count `
+            -Signed $alreadyValid.Count `
+            -NewlySigned 0 `
+            -Skipped $alreadyValid.Count `
+            -SkippedFiles @($alreadyValid) `
+            -Pending $pending.Count `
+            -ForceResign ([bool]$ForceResign)
+    }
+
+    $failures   = New-Object System.Collections.Generic.List[string]
+    $newlySigned = New-Object System.Collections.Generic.List[string]
 
     try {
-        $batch = Invoke-CodeSigner -DigiCertUtilityExe $DigiCertUtilityExe -Files $targets -KernelDriverSigning:$KernelDriverSigning -Quiet:$Quiet
+        $batch = Invoke-CodeSigner `
+            -DigiCertUtilityExe $DigiCertUtilityExe `
+            -Files @($pending) `
+            -KernelDriverSigning:$KernelDriverSigning `
+            -Quiet:$Quiet
+
         if ($batch.Succeeded) {
-            $signed = $targets.Count
-            if (-not $Quiet) {
-                Write-Host 'Batch signing reported success.' -ForegroundColor Green
-            }
-        } else {
-            Write-Banner ("Batch signing failed (ExitCode {0}). Falling back to per-file signing ..." -f $batch.ExitCode) 'WARN'
-            foreach ($f in $targets) {
-                try {
-                    $single = Invoke-CodeSigner -DigiCertUtilityExe $DigiCertUtilityExe -Files @($f) -KernelDriverSigning:$KernelDriverSigning -Quiet:$Quiet
-                    if (-not $single.Succeeded) {
-                        Write-Host ("Signing failed (ExitCode {0}): {1}" -f $single.ExitCode, $f) -ForegroundColor Red
-                        [void]$failures.Add($f)
+            foreach ($file in @($pending)) {
+                if ($Verify) {
+                    $postState = Get-CodeSignatureState -FilePath $file
+                    if (-not $postState.IsValid) {
+                        Write-Host ("Signature verification failed ({0}): {1}" -f $postState.Status, $file) -ForegroundColor Red
+                        $failures.Add($file)
                         continue
                     }
+                }
+                $newlySigned.Add($file)
+            }
+
+            if (-not $Quiet) {
+                Write-Host ("Batch signing completed for {0} file(s)." -f $pending.Count) -ForegroundColor Green
+            }
+        }
+        else {
+            Write-Banner ("Batch signing failed (ExitCode {0}). Falling back to per-file signing ..." -f $batch.ExitCode) 'WARN'
+
+            foreach ($file in @($pending)) {
+                try {
+                    $single = Invoke-CodeSigner `
+                        -DigiCertUtilityExe $DigiCertUtilityExe `
+                        -Files @($file) `
+                        -KernelDriverSigning:$KernelDriverSigning `
+                        -Quiet:$Quiet
+
+                    if (-not $single.Succeeded) {
+                        Write-Host ("Signing failed (ExitCode {0}): {1}" -f $single.ExitCode, $file) -ForegroundColor Red
+                        $failures.Add($file)
+                        continue
+                    }
+
                     if ($Verify) {
-                        $sig = Get-AuthenticodeSignature -FilePath $f
-                        if ($sig.Status -ne 'Valid') {
-                            Write-Host ("Signature verification failed ({0}): {1}" -f $sig.Status, $f) -ForegroundColor Red
-                            [void]$failures.Add($f)
+                        $postState = Get-CodeSignatureState -FilePath $file
+                        if (-not $postState.IsValid) {
+                            Write-Host ("Signature verification failed ({0}): {1}" -f $postState.Status, $file) -ForegroundColor Red
+                            $failures.Add($file)
                             continue
                         }
                     }
-                    Write-Host ("Signed: {0}" -f (Split-Path $f -Leaf)) -ForegroundColor Green
-                    $signed++
-                } catch {
-                    Write-Host ("Signing threw exception: {0} -> {1}" -f $f, $_.Exception.Message) -ForegroundColor Red
-                    [void]$failures.Add($f)
+
+                    $newlySigned.Add($file)
+                    if (-not $Quiet) {
+                        Write-Host ("Signed: {0}" -f (Split-Path $file -Leaf)) -ForegroundColor Green
+                    }
+                }
+                catch {
+                    Write-Host ("Signing threw exception: {0} -> {1}" -f $file, $_.Exception.Message) -ForegroundColor Red
+                    $failures.Add($file)
                 }
             }
         }
-    } catch {
-        Write-Banner ("Signing threw exception: {0}" -f $_.Exception.Message) 'ERROR'
-        foreach ($f in $targets) { [void]$failures.Add($f) }
     }
+    catch {
+        Write-Banner ("Signing threw exception: {0}" -f $_.Exception.Message) 'ERROR'
+        foreach ($file in @($pending)) {
+            if (-not $failures.Contains($file)) {
+                $failures.Add($file)
+            }
+        }
+    }
+
+    $validAfter = $alreadyValid.Count + $newlySigned.Count
 
     if ($failures.Count -gt 0) {
-        Write-Banner ("Some files failed to sign ({0}/{1} failed)." -f $failures.Count, $targets.Count) 'WARN'
-    } else {
-        Write-Banner "All files signed successfully." 'SUCCESS'
+        Write-Banner ("Signing completed with failures: valid={0}/{1}, newly-signed={2}, skipped-valid={3}, failed={4}." -f $validAfter, $targets.Count, $newlySigned.Count, $alreadyValid.Count, $failures.Count) 'WARN'
+    }
+    else {
+        Write-Banner ("Signing state valid: total={0}, newly-signed={1}, skipped-valid={2}." -f $targets.Count, $newlySigned.Count, $alreadyValid.Count) 'SUCCESS'
     }
 
-    [pscustomobject]@{
-        Total  = $targets.Count
-        Signed = $signed
-        Failed = @($failures)
-    }
+    New-CodeSigningResult `
+        -Total $targets.Count `
+        -Signed $validAfter `
+        -NewlySigned $newlySigned.Count `
+        -Skipped $alreadyValid.Count `
+        -SkippedFiles @($alreadyValid) `
+        -Failed @($failures) `
+        -Pending 0 `
+        -ForceResign ([bool]$ForceResign)
 }
 
+function Invoke-DigiCertSigning {
 <#
 .SYNOPSIS
-    Simple global entry point to sign executables and DLLs via DigiCert.
+    Ensures files or directory contents are validly Authenticode-signed.
 
-.DESCRIPTION
-    - Accepts files and/or directories.
-    - When a directory is provided, discovers *.exe and (by default) *.dll under it (recursively).
-    - Uses session defaults if DigiCertUtilityExe is not passed explicitly.
-    - Batch-signs and falls back to per-file to isolate failures.
-    - Optionally verifies Authenticode.
-
-.PARAMETER Path
-    One or more file or directory paths to sign. Directories are expanded to *.exe and (optionally) *.dll.
-
-.PARAMETER DigiCertUtilityExe
-    Full path to DigiCertUtil.exe. If omitted, uses Set-CodeSignerDefaults value.
-
-.PARAMETER KernelDriverSigning
-    Overrides default. If omitted, uses Set-CodeSignerDefaults value.
-
-.PARAMETER IncludeDlls
-    When expanding directories or filtering passed file paths, include *.dll alongside *.exe.
-    Default: $true.
-
-.PARAMETER Verify
-    Verify Authenticode signature after signing.
-
-.PARAMETER Quiet
-    Suppress signer output (still reports summary).
+.EXAMPLE
+    Invoke-DigiCertSigning -Path '.\.venv\Scripts' -Verify
 #>
-function Invoke-DigiCertSigning {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string[]] $Path,
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [ValidateNotNull()]
+        [string[]] $Path,
+
         [string] $DigiCertUtilityExe,
         [AllowNull()][object] $KernelDriverSigning = $null,
         [bool] $IncludeDlls = $true,
         [switch] $Verify,
-        [switch] $Quiet
+        [switch] $Quiet,
+        [switch] $ForceResign
     )
+
     begin {
         $buffer = New-Object System.Collections.Generic.List[string]
     }
     process {
-        foreach ($p in $Path) { if ($p) { $buffer.Add($p) } }
+        foreach ($item in $Path) {
+            if ($item) { $buffer.Add($item) }
+        }
     }
     end {
         $exe = $DigiCertUtilityExe
         if (-not $exe) { $exe = $script:CodeSignerDefaults.DigiCertUtilityExe }
-        if (-not $exe) { throw 'DigiCertUtilityExe not provided and no default set. Call Set-CodeSignerDefaults first or pass -DigiCertUtilityExe.' }
+        if (-not $exe) {
+            throw 'DigiCertUtilityExe not provided and no default set. Call Set-CodeSignerDefaults first or pass -DigiCertUtilityExe.'
+        }
 
         $kds = [bool]$script:CodeSignerDefaults.KernelDriverSigning
         if ($null -ne $KernelDriverSigning) {
             $kds = [bool]$KernelDriverSigning
         }
 
-        # Expand directories and filter to .exe/.dll as applicable
         $resolved = New-Object System.Collections.Generic.List[string]
         foreach ($item in @($buffer)) {
             if (-not $item) { continue }
 
             if (Test-Path -LiteralPath $item -PathType Container) {
-                $resolved.AddRange( (Get-ExecutableTargets -Root $item -IncludeDlls:$IncludeDlls -Recurse:$true) )
+                foreach ($found in @(Get-ExecutableTargets -Root $item -IncludeDlls:$IncludeDlls -Recurse:$true)) {
+                    $resolved.Add($found)
+                }
                 continue
             }
 
@@ -319,27 +491,38 @@ function Invoke-DigiCertSigning {
         $files = @($resolved | Select-Object -Unique)
         if ($files.Count -eq 0) {
             Write-Host 'No files to sign.' -ForegroundColor Yellow
-            return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+            return New-CodeSigningResult
         }
 
-        Set-CodeSignature -DigiCertUtilityExe $exe -Files $files -KernelDriverSigning:$kds -Verify:$Verify -Quiet:$Quiet
+        $params = @{
+            DigiCertUtilityExe  = $exe
+            Files               = $files
+            KernelDriverSigning = $kds
+            Verify              = [bool]$Verify
+            Quiet               = [bool]$Quiet
+            ForceResign         = [bool]$ForceResign
+        }
+        if ($PSBoundParameters.ContainsKey('WhatIf')) { $params.WhatIf = [bool]$WhatIfPreference }
+        if ($PSBoundParameters.ContainsKey('Confirm')) { $params.Confirm = [bool]$PSBoundParameters['Confirm'] }
+
+        Set-CodeSignature @params
     }
 }
 
+function Get-ExecutableTargets {
 <#
 .SYNOPSIS
-    Discovers signable files (*.exe and, by default, *.dll) under a directory.
-
-.PARAMETER IncludeDlls
-    Also collect *.dll files alongside *.exe. Default: $true (DigiCert can sign both).
+    Discovers signable *.exe and optionally *.dll files below a directory.
 #>
-function Get-ExecutableTargets {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)][string] $Root,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Root,
+
         [string[]] $IncludeNames,
-        [bool]   $Recurse    = $true,
-        [bool]   $IncludeDlls = $true
+        [bool] $Recurse = $true,
+        [bool] $IncludeDlls = $true
     )
 
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
@@ -354,45 +537,40 @@ function Get-ExecutableTargets {
     }
 
     if ($IncludeNames -and @($IncludeNames).Count -gt 0) {
-        $nameSet = $IncludeNames | ForEach-Object { $_.ToLowerInvariant() }
+        $nameSet = @($IncludeNames | ForEach-Object { $_.ToLowerInvariant() })
         $items = $items | Where-Object { $nameSet -contains $_.Name.ToLowerInvariant() }
     }
+
     @($items | Select-Object -ExpandProperty FullName -Unique)
 }
 
+function Set-VenvScriptSignature {
 <#
 .SYNOPSIS
-    Signs executables and (optionally) DLLs under .venv\Scripts (optionally a subset by name).
+    Ensures executables/DLLs below .venv\Scripts have valid signatures.
 
-.PARAMETER DigiCertUtilityExe
-    Optional. Falls back to the value from Set-CodeSignerDefaults.
+.DESCRIPTION
+    Existing Valid Authenticode signatures are skipped. This makes repeated
+    setup and dependency-update runs cheap: only newly installed or changed
+    binaries are sent to DigiCert.
 
-.PARAMETER KernelDriverSigning
-    Default: $false. Only set when signing actual kernel drivers.
-
-.PARAMETER IncludeNames
-    Optional list of specific file names to include (case-insensitive). Applies to both EXEs and DLLs.
-
-.PARAMETER PoetryOnly
-    Shortcut to only sign poetry.exe.
-
-.PARAMETER Verify
-    If set, validates signatures with Get-AuthenticodeSignature and treats non-Valid as failure.
-
-.PARAMETER IncludeDlls
-    Include *.dll alongside *.exe when discovering files in the Scripts folder (default: $true).
+.EXAMPLE
+    Set-VenvScriptSignature -VenvDir '.\.venv' -Verify
 #>
-function Set-VenvScriptSignature {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [Parameter(Mandatory=$true)][string] $VenvDir,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $VenvDir,
+
         [string] $DigiCertUtilityExe,
         [bool] $KernelDriverSigning = $false,
         [string[]] $IncludeNames,
         [switch] $PoetryOnly,
         [switch] $Verify,
         [switch] $Quiet,
-        [bool] $IncludeDlls = $true
+        [bool] $IncludeDlls = $true,
+        [switch] $ForceResign
     )
 
     if (-not $DigiCertUtilityExe) { $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe }
@@ -402,82 +580,97 @@ function Set-VenvScriptSignature {
 
     if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) {
         Write-Banner ("Venv not found at: {0}" -f $VenvDir) 'ERROR'
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        return New-CodeSigningResult
     }
 
     $scriptsDir = [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts'))
     if (-not (Test-Path -LiteralPath $scriptsDir -PathType Container)) {
         Write-Banner ("Scripts folder not found at: {0}" -f $scriptsDir) 'ERROR'
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        return New-CodeSigningResult
     }
 
     $names = $IncludeNames
     if ($PoetryOnly) { $names = @('poetry.exe') }
 
-    $targets = Get-ExecutableTargets -Root $scriptsDir -IncludeNames $names -Recurse:$true -IncludeDlls:$IncludeDlls
-    $targets = @($targets)
+    $targets = @(Get-ExecutableTargets -Root $scriptsDir -IncludeNames $names -Recurse:$true -IncludeDlls:$IncludeDlls)
     if ($targets.Count -eq 0) {
         $pattern = if ($names) { ($names -join ',') } else { if ($IncludeDlls) { '*.exe,*.dll' } else { '*.exe' } }
         Write-Host ("No {0} found under: {1}" -f $pattern, $scriptsDir) -ForegroundColor Yellow
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        return New-CodeSigningResult
     }
 
     if ($KernelDriverSigning) {
-        Write-Host "Signing mode: Kernel driver signing (/kernelDriverSigning)" -ForegroundColor Yellow
-    } else {
-        Write-Host "Signing mode: Normal code signing" -ForegroundColor Yellow
+        Write-Host 'Signing mode: Kernel driver signing (/kernelDriverSigning)' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'Signing mode: Normal code signing' -ForegroundColor Yellow
     }
 
-    Set-CodeSignature -DigiCertUtilityExe $DigiCertUtilityExe -Files $targets -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
+    $params = @{
+        DigiCertUtilityExe  = $DigiCertUtilityExe
+        Files               = $targets
+        KernelDriverSigning = $KernelDriverSigning
+        Verify              = [bool]$Verify
+        Quiet               = [bool]$Quiet
+        ForceResign         = [bool]$ForceResign
+    }
+    if ($PSBoundParameters.ContainsKey('WhatIf')) { $params.WhatIf = [bool]$WhatIfPreference }
+    if ($PSBoundParameters.ContainsKey('Confirm')) { $params.Confirm = [bool]$PSBoundParameters['Confirm'] }
+
+    Set-CodeSignature @params
 }
 
+function Set-PoetryShimSignature {
 <#
 .SYNOPSIS
-    Signs the Poetry CLI shim (poetry.exe) installed by the official installer.
+    Ensures the package-manager CLI shim has a valid Authenticode signature.
 
 .DESCRIPTION
-    Requires the caller to pass an explicit -ShimPath. This keeps CodeSigning
-    ignorant of Poetry's layout; the orchestrator should resolve the shim and pass the result here.
+    Despite the historic function name, callers may pass the resolved package
+    manager shim path. A currently valid signature is accepted and skipped.
 
-.PARAMETER ShimPath
-    Absolute path to poetry.exe. If missing or the file does not exist,
-    the function warns and no-ops (returns an empty result).
-
-.PARAMETER DigiCertUtilityExe
-    Optional. Falls back to the value from Set-CodeSignerDefaults.
-
-.PARAMETER KernelDriverSigning
-    Default: $false. Kernel driver signing is wrong for a Python CLI shim.
+.EXAMPLE
+    Set-PoetryShimSignature -ShimPath $poetryExe -Verify
 #>
-function Set-PoetryShimSignature {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
         [string] $ShimPath,
         [string] $DigiCertUtilityExe,
         [bool] $KernelDriverSigning = $false,
         [switch] $Verify,
-        [switch] $Quiet
+        [switch] $Quiet,
+        [switch] $ForceResign
     )
 
     if (-not $ShimPath) {
         Write-Banner 'Set-PoetryShimSignature called without -ShimPath; nothing to sign.' 'WARN'
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        return New-CodeSigningResult
     }
 
     if (-not (Test-Path -LiteralPath $ShimPath -PathType Leaf)) {
-        Write-Banner ("poetry.exe not found at: {0} -- skipping shim signing." -f $ShimPath) 'WARN'
-        return [pscustomobject]@{ Total = 0; Signed = 0; Failed = @() }
+        Write-Banner ("Package-manager shim not found at: {0} -- skipping shim signing." -f $ShimPath) 'WARN'
+        return New-CodeSigningResult
     }
 
     if (-not $DigiCertUtilityExe) { $DigiCertUtilityExe = $script:CodeSignerDefaults.DigiCertUtilityExe }
 
-    Invoke-DigiCertSigning -Path $ShimPath -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning:$KernelDriverSigning -Verify:$Verify -Quiet:$Quiet
+    $params = @{
+        Path                = @($ShimPath)
+        DigiCertUtilityExe  = $DigiCertUtilityExe
+        KernelDriverSigning = $KernelDriverSigning
+        IncludeDlls         = $false
+        Verify              = [bool]$Verify
+        Quiet               = [bool]$Quiet
+        ForceResign         = [bool]$ForceResign
+    }
+    if ($PSBoundParameters.ContainsKey('WhatIf')) { $params.WhatIf = [bool]$WhatIfPreference }
+    if ($PSBoundParameters.ContainsKey('Confirm')) { $params.Confirm = [bool]$PSBoundParameters['Confirm'] }
+
+    Invoke-DigiCertSigning @params
 }
 
-# -----------------------------------------------------------------------------
-# Backward-compatible aliases for old (unapproved-verb) names
-# -----------------------------------------------------------------------------
-Set-Alias -Name 'Sign-Files'         -Value 'Set-CodeSignature'
+# Backward-compatible aliases.
+Set-Alias -Name 'Sign-Files'          -Value 'Set-CodeSignature'
 Set-Alias -Name 'Sign-ExeViaDigiCert' -Value 'Invoke-DigiCertSigning'
 Set-Alias -Name 'Sign-VenvScripts'    -Value 'Set-VenvScriptSignature'
 Set-Alias -Name 'Sign-PoetryShim'     -Value 'Set-PoetryShimSignature'
@@ -485,6 +678,7 @@ Set-Alias -Name 'Sign-PoetryShim'     -Value 'Set-PoetryShimSignature'
 Export-ModuleMember -Function `
     Set-CodeSignerDefaults, `
     Get-CodeSignerDefaults, `
+    Get-CodeSignatureState, `
     Invoke-CodeSigner, `
     Set-CodeSignature, `
     Invoke-DigiCertSigning, `
