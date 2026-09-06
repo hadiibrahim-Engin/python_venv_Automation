@@ -19,7 +19,7 @@ Describe 'Resolve-PackageManager' {
         $root = Join-Path $TestDrive 'config'
         New-Item -ItemType Directory -Path $root | Out-Null
         '{"PackageManager":"poetry"}' | Set-Content -LiteralPath (Join-Path $root '.setup-config.json') -Encoding UTF8
-        Clear-SetupConfigCache
+        InModuleScope Detection { Clear-SetupConfigCache }
         $result = Resolve-PackageManager -CliChoice auto -ProjectRoot $root
         $result.PackageManager | Should -Be 'poetry'
         $result.Source | Should -Be 'config-file'
@@ -36,7 +36,7 @@ requires-python = ">=3.11"
 [tool.uv]
 package = true
 '@ | Set-Content -LiteralPath (Join-Path $root 'pyproject.toml') -Encoding UTF8
-        Clear-SetupConfigCache
+        InModuleScope Detection { Clear-SetupConfigCache }
         $result = Resolve-PackageManager -CliChoice auto -ProjectRoot $root
         $result.PackageManager | Should -Be 'uv'
     }
@@ -52,7 +52,7 @@ version = "0.1.0"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 '@ | Set-Content -LiteralPath (Join-Path $root 'pyproject.toml') -Encoding UTF8
-        Clear-SetupConfigCache
+        InModuleScope Detection { Clear-SetupConfigCache }
         $result = Resolve-PackageManager -CliChoice auto -ProjectRoot $root
         $result.PackageManager | Should -Be 'poetry'
     }
