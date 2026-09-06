@@ -1,44 +1,70 @@
 # Phase 2 - Architecture and Maintainability Refactoring
 
-## Goal
+## Status
 
-Phase 2 turns the setup engine from a large orchestration function into a set of small, testable pipeline steps with centralized constants and structured errors.
+Phase 2 is implemented on the refactoring branch. `Start-Setup` now builds and executes named setup steps rather than containing the full setup implementation inline.
 
-The migration is deliberately incremental. The existing `Start-Setup` behavior remains the compatibility contract while logic is extracted into reusable modules.
+The public compatibility contract remains:
 
----
+```text
+devsetup
+Invoke-PythonVenvSetup
+scripts4PythonAutomation\setup-core.ps1
+```
 
-## New architecture building blocks
+## Architecture
 
-### `Constants.psm1`
+```mermaid
+flowchart TD
+    A[Invoke-PythonVenvSetup] --> B[Safe Git Sync]
+    B --> C[Start-Setup]
+    C --> D[Build Setup Context]
+    D --> E[Build ordered Step definitions]
+    E --> F[SetupPipeline]
+    F --> G[PRECHECK]
+    G --> H[METADATA]
+    H --> I[PYTHON]
+    I --> J[PM-RUNTIME]
+    J --> K[PM-SIGN]
+    K --> L[PM-CONFIG]
+    L --> M[VENV-PREPARE]
+    M --> N[VENV-VALIDATE]
+    N --> O[LOCK]
+    O --> P[DEPENDENCIES]
+    P --> Q[PROJECT-PTH / VSCODE / TCL]
+    Q --> R[SMART-SIGNING]
+    R --> S[CLEANUP]
+    S --> T[PERSIST CONFIG]
+    T --> U[DONE]
+```
 
-Central source for values that were previously scattered through modules:
+## `Constants.psm1`
+
+Central source for setup constants that were previously scattered through modules. Current groups include:
 
 ```text
 ConfigFileName
 PackageManagers
-Git.RemoteName
-Git.FetchTimeoutSeconds
-Git.DefaultPullStrategy
-Input.MaxBooleanTextLength
-CodeSigning.DefaultDigiCertUtilityExe
-Retry.MaxRetry
-Retry.DelayMs
+Git.*
+Network.*
+Input.*
+CodeSigning.*
+Retry.*
 ```
 
-Consumers should use:
+Examples include the Git fetch timeout, DigiCert default path, input-length limits, venv deletion retry budget, cleanup retry budget, and network-probe timeout.
+
+Consumers use:
 
 ```powershell
 $constants = Get-SetupConstants
 ```
 
-instead of copying literals into new modules.
+`Get-SetupConstants` returns a defensive deep copy so one caller cannot alter defaults for another setup run.
 
----
+## `Errors.psm1`
 
-### `Errors.psm1`
-
-Introduces the custom exception type:
+Defines `SetupException`:
 
 ```text
 SetupException
@@ -48,29 +74,26 @@ SetupException
 └── Context
 ```
 
-Example:
+Arbitrary exceptions are normalized through `ConvertTo-SetupException`. The pipeline preserves the original exception as `InnerException` while exposing a stable error code and step identifier for CI/CD.
 
-```powershell
-throw (New-SetupException `
-    -Message 'Compatible Python was not found.' `
-    -ErrorCode 'PYTHON_NOT_FOUND' `
-    -Step 'PYTHON' `
-    -Context @{ ProjectRoot = $ctx.ProjectRoot })
+Representative codes include:
+
+```text
+DIGICERT_NOT_FOUND
+PRECHECK_FAILED
+PM_DETECTION_FAILED
+PYTHON_RESOLUTION_FAILED
+PM_RUNTIME_FAILED
+PM_SIGNING_FAILED
+VENV_PREPARE_FAILED
+DEPENDENCY_INSTALL_FAILED
+VENV_SIGNING_FAILED
+VENV_UPDATE_FAILED
 ```
 
-Arbitrary PowerShell/native errors can be normalized with:
+## `SetupPipeline.psm1`
 
-```powershell
-ConvertTo-SetupException
-```
-
-This provides stable error codes for CI/CD without losing the original exception.
-
----
-
-### `SetupPipeline.psm1`
-
-Provides three primitives:
+Provides:
 
 ```text
 New-SetupPipelineStep
@@ -78,127 +101,69 @@ Invoke-SetupPipelineStep
 Invoke-SetupPipeline
 ```
 
-A step is represented by metadata plus one action:
+The pipeline layer owns:
+
+- ordered execution;
+- per-step timing;
+- mandatory vs optional failure behavior;
+- dry-run skip behavior;
+- conversion to `SetupException`;
+- structured logging callbacks.
+
+Example:
 
 ```powershell
 $step = New-SetupPipelineStep `
-    -Name 'PYTHON' `
-    -Module 'PythonDiscovery' `
-    -Message 'Resolve compatible Python interpreter' `
-    -ReadOnly `
-    -ErrorCode 'PYTHON_RESOLUTION_FAILED' `
+    -Name 'DEPENDENCIES' `
+    -Module 'PackageManager' `
+    -Message 'Install/update project dependencies' `
+    -ErrorCode 'DEPENDENCY_INSTALL_FAILED' `
     -Action {
-        Invoke-PythonDetectionStep -Ctx $ctx
+        Invoke-DependencyInstallStep -Ctx $ctx
     }
 ```
 
-The execution helper owns:
+## `SetupSteps.psm1`
 
-- timing,
-- mandatory vs optional failure behavior,
-- dry-run skip behavior,
-- conversion to `SetupException`,
-- optional logging callbacks.
-
----
-
-## Target pipeline
-
-```mermaid
-flowchart TD
-    A[Invoke-PythonVenvSetup] --> B[Git Sync]
-    B --> C[Start-Setup]
-
-    C --> D[Build Setup Context]
-    D --> E[Build ordered Step definitions]
-
-    E --> F[DETECT]
-    F --> G[PRECHECK]
-    G --> H[PYTHON]
-    H --> I[PM-RUNTIME]
-    I --> J[PM-SIGN]
-    J --> K[PM-CONFIG]
-    K --> L[VENV-PREPARE]
-    L --> M[VENV-VALIDATE]
-    M --> N[LOCK]
-    N --> O[DEPENDENCIES]
-    O --> P[PROJECT-WIRING]
-    P --> Q[SMART-SIGNING]
-    Q --> R[CLEANUP]
-    R --> S[PERSIST-CONFIG]
-    S --> T[DONE]
-```
-
-The final `Start-Setup` should mainly do three things:
+The former `Start-Setup` blocks now live in named functions, including:
 
 ```text
-1. Build context
-2. Build step list
-3. Execute pipeline
+New-SetupContext
+Invoke-PackageManagerDetectionStep
+Invoke-PrecheckStep
+Invoke-ProjectMetadataStep
+Invoke-PythonDetectionStep
+Invoke-PackageManagerRuntimeStep
+Invoke-PackageManagerSigningStep
+Invoke-PackageManagerConfigureStep
+Invoke-PackageManagerCleanupStep
+Invoke-VenvBackupStep
+Invoke-VenvPrepareStep
+Invoke-VenvValidationStep
+Invoke-VenvRuntimeCopyStep
+Invoke-LockSyncStep
+Invoke-DependencyInstallStep
+Invoke-VenvPathStep
+Invoke-ProjectPthStep
+Invoke-VSCodeStep
+Invoke-TclStep
+Invoke-SmartSigningStep
+Invoke-StaleCleanupStep
+Invoke-VenvBackupCleanupStep
+Invoke-ExistingVenvUpdateStep
 ```
 
----
+Mutating step functions support PowerShell `ShouldProcess`, so direct module use remains compatible with `-WhatIf` and `-Confirm`, not only execution through `Start-Setup`.
 
-## Planned extraction from `Start-Setup`
+## Venv and filesystem safety
 
-The current monolithic blocks are migrated into named functions in this order:
+The lower-level venv/filesystem helpers were also hardened. Destructive or mutating operations such as recursive deletion, process termination, backup/restore, `.pth` writes, DLL copies, quarantine moves, and stale cleanup support `ShouldProcess`.
 
-| Current logic | Target function |
-|---|---|
-| package manager detection | `Invoke-PackageManagerDetectionStep` |
-| prechecks | `Invoke-PrecheckStep` |
-| pyproject parsing | `Invoke-ProjectMetadataStep` |
-| Python resolution | `Invoke-PythonDetectionStep` |
-| PM runtime setup | `Invoke-PackageManagerRuntimeStep` |
-| PM shim signing | `Invoke-PackageManagerSigningStep` |
-| venv preparation | `Invoke-VenvPreparationStep` |
-| lock handling | `Invoke-LockStep` |
-| dependency installation/update | `Invoke-DependencyStep` |
-| `.pth` / VS Code / Tcl | `Invoke-ProjectWiringStep` |
-| smart DigiCert signing | `Invoke-CodeSigningStep` |
-| backup/quarantine cleanup | `Invoke-CleanupStep` |
-| config persistence | `Invoke-ConfigPersistenceStep` |
+Retry numbers and delays are no longer embedded at call sites. They are resolved from `Constants.psm1`.
 
-This order keeps behavior stable while reducing the size of `Start-Setup` progressively.
+## Parameter validation
 
----
-
-## Error-code strategy
-
-Error codes should be stable identifiers rather than raw exception messages.
-
-Suggested families:
-
-```text
-SETUP_*
-CONFIG_*
-GIT_*
-PYTHON_*
-PM_*
-VENV_*
-SIGNING_*
-FILESYSTEM_*
-```
-
-Examples:
-
-```text
-SETUP_PLATFORM_UNSUPPORTED
-CONFIG_WRITE_FAILED
-GIT_FETCH_TIMEOUT
-PYTHON_NOT_FOUND
-PM_RUNTIME_FAILED
-VENV_CREATE_FAILED
-SIGNING_FAILED
-```
-
-Console output can remain human-readable while CI/CD can key off `ErrorCode`.
-
----
-
-## Parameter validation policy
-
-Critical public/internal parameters should use PowerShell validation attributes where possible:
+Critical boundaries use PowerShell validation attributes where applicable:
 
 ```powershell
 [ValidateNotNullOrEmpty()]
@@ -207,73 +172,56 @@ Critical public/internal parameters should use PowerShell validation attributes 
 [ValidateScript(...)]
 ```
 
-Example for project roots:
+Project roots are validated before setup mutation begins. Package-manager choices, setup mode, logging level, timeout ranges, and user-input lengths are constrained at their respective boundaries.
 
-```powershell
-[ValidateScript({
-    if (-not (Test-Path -LiteralPath $_ -PathType Container)) {
-        throw "Directory does not exist: $_"
-    }
-    $true
-})]
-[string] $ProjectRoot
-```
+## Dry-run semantics
 
-Validation should happen at the boundary, before mutation starts.
+Read-only steps such as package-manager detection, metadata parsing, and precheck reporting may execute during dry-run.
 
----
+Steps that can mutate state are skipped. Python resolution is intentionally classified as mutation-capable because it may install Python when `AllowPythonInstall` is enabled.
 
-## Compatibility rule
+`Start-Setup -WhatIf` therefore behaves as a mutation-safe preview rather than merely suppressing a subset of file writes.
 
-Phase 2 must not change the normal caller contract:
+## Compatibility
 
-```powershell
-devsetup
-Invoke-PythonVenvSetup
-.\scripts4PythonAutomation\setup-core.ps1
-```
+The refactor preserves the caller-facing command surface and legacy wrapper. Behavior changes are limited to documented safety fixes, including:
 
-Existing arguments remain valid. Internal architecture may change, but observable behavior should only change when fixing a defect or making an explicitly documented safety improvement.
-
----
+- safe Git synchronization;
+- fail-safe config persistence;
+- explicit DigiCert validation;
+- intelligent/idempotent signing;
+- structured error reporting;
+- `ShouldProcess` support.
 
 ## Tests
 
-`tests/Architecture.Tests.ps1` covers the Phase 2 primitives:
+Architecture and behavior are covered by focused Pester files for:
 
-- centralized constants,
-- defensive copies of constants,
-- structured exception metadata,
-- preservation of inner exceptions,
-- ordered pipeline execution,
-- dry-run behavior,
-- mandatory failure behavior,
-- optional failure continuation.
+- constants and defensive copies;
+- `SetupException` metadata and inner exceptions;
+- pipeline ordering, dry-run and error behavior;
+- Git synchronization decisions;
+- config persistence failures;
+- uv/Poetry detection;
+- smart signing;
+- structured logging;
+- repository-wide PowerShell syntax.
 
-As each old `Start-Setup` block is extracted, its behavior should receive focused unit tests before the old inline block is removed.
+`Run-Tests.ps1` enforces a 70% coverage gate for the refactored core logic in GitHub Actions and Azure Pipelines.
 
----
-
-## Migration status
-
-Implemented:
+## Migration checklist
 
 ```text
 [x] Constants.psm1
 [x] Errors.psm1 / SetupException
 [x] SetupPipeline.psm1
-[x] Architecture.Tests.ps1
-[x] Phase 2 architecture documentation
+[x] SetupSteps.psm1
+[x] Start-Setup migrated to named pipeline steps
+[x] GitSync integrated before setup
+[x] parameter boundary validation
+[x] mutating setup steps support ShouldProcess
+[x] venv/filesystem retry constants centralized
+[x] stable per-step error codes
+[x] architecture/Pester tests
+[x] documentation updated
 ```
-
-Next migration slice:
-
-```text
-[ ] import new Phase 2 modules from Setup-Core.psm1
-[ ] replace legacy Invoke-SetupStep internals with SetupPipeline primitive
-[ ] extract DETECT / PRECHECK / PYTHON steps
-[ ] add stable error codes to those steps
-[ ] add parameter boundary validation
-```
-
-The remaining setup steps can then be migrated in smaller reviewed commits instead of one high-risk rewrite.
