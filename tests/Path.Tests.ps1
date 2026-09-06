@@ -26,11 +26,11 @@ Describe 'Install-DevSetupCommand idempotency' {
     It 'adds the bin directory to the process PATH exactly once across repeated installs' {
         $r1 = Install-DevSetupCommand -Force 6>$null
         $bin = $r1.BinDirectory
-        $r2 = Install-DevSetupCommand -Force 6>$null
-        $r3 = Install-DevSetupCommand -Force 6>$null
+        Install-DevSetupCommand -Force 6>$null | Out-Null
+        Install-DevSetupCommand -Force 6>$null | Out-Null
 
         $sep = [System.IO.Path]::PathSeparator
-        $occurrences = ($env:Path -split [regex]::Escape($sep) | Where-Object { $_.TrimEnd('\','/') -ieq $bin.TrimEnd('\','/') }).Count
+        $occurrences = @($env:Path -split [regex]::Escape($sep) | Where-Object { $_.TrimEnd('\','/') -ieq $bin.TrimEnd('\','/') }).Count
         $occurrences | Should -Be 1
     }
 
@@ -41,10 +41,8 @@ Describe 'Install-DevSetupCommand idempotency' {
 
     It 'fails (by default) to clobber existing shims without -Force' {
         Install-DevSetupCommand -Force 6>$null | Out-Null
-        # New-DevSetupShim without -Force should refuse to overwrite.
         $bin = (Get-PythonVenvSetupInfo).BinDirectory
-        { InModuleScope PythonVenvAutomation -Parameters @{ Bin = $bin } { param($Bin) New-DevSetupShim -BinDirectory $Bin } } |
-            Should -Throw
+        { InModuleScope PythonVenvAutomation -Parameters @{ Bin = $bin } { param($Bin) New-DevSetupShim -BinDirectory $Bin } } | Should -Throw
     }
 
     It 'writes the runtime config under the LOCALAPPDATA tree' {
