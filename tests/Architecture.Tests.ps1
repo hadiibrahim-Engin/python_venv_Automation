@@ -26,7 +26,6 @@ Describe 'Constants.psm1' {
     It 'returns an independent copy on every call' {
         $first = Get-SetupConstants
         $second = Get-SetupConstants
-
         $first.Git.FetchTimeoutSeconds = 99
         $second.Git.FetchTimeoutSeconds | Should -Be 10
     }
@@ -34,12 +33,9 @@ Describe 'Constants.psm1' {
 
 Describe 'SetupException' {
     It 'preserves structured error metadata' {
-        $exception = New-SetupException `
-            -Message 'Failure' `
-            -ErrorCode 'TEST_FAILURE' `
-            -Step 'TEST' `
-            -Context @{ Project = 'demo' }
-
+        $exception = InModuleScope SetupPipeline {
+            New-SetupException -Message 'Failure' -ErrorCode 'TEST_FAILURE' -Step 'TEST' -Context @{ Project = 'demo' }
+        }
         $exception.GetType().Name | Should -Be 'SetupException'
         $exception.ErrorCode | Should -Be 'TEST_FAILURE'
         $exception.Step | Should -Be 'TEST'
@@ -47,16 +43,10 @@ Describe 'SetupException' {
     }
 
     It 'wraps native exceptions and preserves inner exception' {
-        try {
-            throw [System.InvalidOperationException]::new('native failure')
+        $wrapped = InModuleScope SetupPipeline {
+            try { throw [System.InvalidOperationException]::new('native failure') }
+            catch { ConvertTo-SetupException -ErrorRecord $_ -ErrorCode 'WRAPPED' -Step 'UNIT' }
         }
-        catch {
-            $wrapped = ConvertTo-SetupException `
-                -ErrorRecord $_ `
-                -ErrorCode 'WRAPPED' `
-                -Step 'UNIT'
-        }
-
         $wrapped.ErrorCode | Should -Be 'WRAPPED'
         $wrapped.InnerException.Message | Should -Be 'native failure'
     }
@@ -65,14 +55,9 @@ Describe 'SetupException' {
 Describe 'SetupPipeline primitives' {
     It 'executes steps in order' {
         $script:order = New-Object System.Collections.Generic.List[string]
-
-        $steps = @(
-            New-SetupPipelineStep -Name 'ONE' -Module 'Test' -Message 'one' -Action { $script:order.Add('ONE') },
-            New-SetupPipelineStep -Name 'TWO' -Module 'Test' -Message 'two' -Action { $script:order.Add('TWO') }
-        )
-
-        $results = Invoke-SetupPipeline -Steps $steps
-
+        $step1 = New-SetupPipelineStep -Name 'ONE' -Module 'Test' -Message 'one' -Action { $script:order.Add('ONE') }
+        $step2 = New-SetupPipelineStep -Name 'TWO' -Module 'Test' -Message 'two' -Action { $script:order.Add('TWO') }
+        $results = Invoke-SetupPipeline -Steps @($step1, $step2)
         @($script:order) | Should -Be @('ONE', 'TWO')
         @($results).Count | Should -Be 2
         $results[0].Status | Should -Be 'OK'
@@ -82,14 +67,9 @@ Describe 'SetupPipeline primitives' {
     It 'skips mutating steps in dry-run but executes read-only steps' {
         $script:mutated = $false
         $script:read = $false
-
-        $steps = @(
-            New-SetupPipelineStep -Name 'READ' -Module 'Test' -Message 'read' -ReadOnly -Action { $script:read = $true },
-            New-SetupPipelineStep -Name 'WRITE' -Module 'Test' -Message 'write' -Action { $script:mutated = $true }
-        )
-
-        $results = Invoke-SetupPipeline -Steps $steps -DryRun
-
+        $readStep = New-SetupPipelineStep -Name 'READ' -Module 'Test' -Message 'read' -ReadOnly -Action { $script:read = $true }
+        $writeStep = New-SetupPipelineStep -Name 'WRITE' -Module 'Test' -Message 'write' -Action { $script:mutated = $true }
+        $results = Invoke-SetupPipeline -Steps @($readStep, $writeStep) -DryRun
         $script:read | Should -BeTrue
         $script:mutated | Should -BeFalse
         $results[0].Status | Should -Be 'OK'
@@ -97,13 +77,7 @@ Describe 'SetupPipeline primitives' {
     }
 
     It 'wraps mandatory failures as SetupException' {
-        $step = New-SetupPipelineStep `
-            -Name 'FAIL' `
-            -Module 'Test' `
-            -Message 'failure' `
-            -ErrorCode 'PIPE_TEST' `
-            -Action { throw 'boom' }
-
+        $step = New-SetupPipelineStep -Name 'FAIL' -Module 'Test' -Message 'failure' -ErrorCode 'PIPE_TEST' -Action { throw 'boom' }
         try {
             Invoke-SetupPipelineStep -Step $step
             throw 'Expected pipeline step to fail.'
@@ -116,15 +90,8 @@ Describe 'SetupPipeline primitives' {
     }
 
     It 'continues after optional-step failure' {
-        $optional = New-SetupPipelineStep `
-            -Name 'OPTIONAL' `
-            -Module 'Test' `
-            -Message 'optional' `
-            -Mandatory:$false `
-            -Action { throw 'optional failure' }
-
+        $optional = New-SetupPipelineStep -Name 'OPTIONAL' -Module 'Test' -Message 'optional' -Mandatory:$false -Action { throw 'optional failure' }
         $result = Invoke-SetupPipelineStep -Step $optional
-
         $result.Status | Should -Be 'WARN'
         $result.Error.GetType().Name | Should -Be 'SetupException'
     }
