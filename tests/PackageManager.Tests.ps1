@@ -202,6 +202,41 @@ Describe 'Resolve-PackageManager fail-closed behaviour' {
         $r.Source | Should -Be 'cli'
     }
 
+    It 'fails closed on a headless host even without -NonInteractive' {
+        # Read-Host returns $null with no console attached; prompting there
+        # would burn three attempts and end in a confusing error.
+        $root = Join-Path $TestDrive 'headless'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root 'pyproject.toml') -Value "[project]`nname = `"demo`"" -Encoding UTF8
+        Clear-TomlCache
+        InModuleScope Detection { Clear-SetupConfigCache }
+
+        Mock -ModuleName Detection Test-SetupInteractive { $false }
+        Mock -ModuleName Detection Read-Host { throw 'Read-Host must not be called on a headless host' }
+
+        $err = $null
+        try { Resolve-PackageManager -CliChoice auto -ProjectRoot $root } catch { $err = $_.Exception }
+        $err.ErrorCode | Should -Be 'PYPROJECT_PM_AMBIGUOUS'
+        Should -Invoke -ModuleName Detection Read-Host -Times 0 -Exactly
+    }
+
+    It 'survives Read-Host returning $null when a console is claimed to exist' {
+        $root = Join-Path $TestDrive 'nullanswer'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root 'pyproject.toml') -Value "[project]`nname = `"demo`"" -Encoding UTF8
+        Clear-TomlCache
+        InModuleScope Detection { Clear-SetupConfigCache }
+
+        Mock -ModuleName Detection Test-SetupInteractive { $true }
+        Mock -ModuleName Detection Read-Host { $null }
+
+        # Must raise the structured error, not "cannot call a method on a
+        # null-valued expression".
+        $err = $null
+        try { Resolve-PackageManager -CliChoice auto -ProjectRoot $root } catch { $err = $_.Exception }
+        $err.ErrorCode | Should -Be 'PYPROJECT_PM_AMBIGUOUS'
+    }
+
     It 'accepts an interactive selection and reports source user-decision' {
         $root = Join-Path $TestDrive 'interactive'
         New-Item -ItemType Directory -Path $root -Force | Out-Null
@@ -209,6 +244,7 @@ Describe 'Resolve-PackageManager fail-closed behaviour' {
         Clear-TomlCache
         InModuleScope Detection { Clear-SetupConfigCache }
 
+        Mock -ModuleName Detection Test-SetupInteractive { $true }
         Mock -ModuleName Detection Read-Host { '2' }
         $r = Resolve-PackageManager -CliChoice auto -ProjectRoot $root
         $r.PackageManager | Should -Be 'poetry'
@@ -222,6 +258,7 @@ Describe 'Resolve-PackageManager fail-closed behaviour' {
         Clear-TomlCache
         InModuleScope Detection { Clear-SetupConfigCache }
 
+        Mock -ModuleName Detection Test-SetupInteractive { $true }
         Mock -ModuleName Detection Read-Host { 'nonsense' }
         { Resolve-PackageManager -CliChoice auto -ProjectRoot $root } | Should -Throw
     }

@@ -60,7 +60,9 @@ SELF-TEST PASSED
 | `info` | `Get-PythonVenvSetupInfo` — command name, shim paths, engine path, auto-update config. |
 | `detect` | `Resolve-PackageManager` across four generated pyproject fixtures. |
 | `pipeline` | Runs the real `Invoke-PythonVenvSetup` orchestration. `-WhatIf` by default; `-Real` to actually mutate. |
-| `fixtures` | Writes the fixture projects and exits. |
+| `fixtures` | Writes the small fixture projects and exits. |
+| `dummy` | Builds the full dummy workspace: 11 project layouts + 7 real Git repos with real upstreams (`tests/dummy/New-DummyProject.ps1`). |
+| `matrix` | Runs every host-runnable feature against that workspace and prints a PASS/FAIL/SKIP matrix (`tests/dummy/Invoke-FeatureMatrix.ps1`). |
 | `exec` | Evaluates `-Script <snippet>` or `-File <path.ps1>` with the whole engine loaded. **This is the direct-invocation path** — use it to call any internal function. |
 
 Useful flags: `-ProjectPath <dir>` (`detect`, `pipeline`), `-WorkDir <dir>`
@@ -72,18 +74,18 @@ Useful flags: `-ProjectPath <dir>` (`detect`, `pipeline`), `-WorkDir <dir>`
 flowchart TD
     A[driver.ps1 verb] --> B[Import-DevSetupEngine]
     B --> C[Pass 1: Import PythonVenvAutomation.psd1<br/>chains to Setup-Core.psm1]
-    C --> D{Constants, Toml, Errors ...<br/>still global?}
-    D -->|No — de-globalized by nested<br/>-Force imports| E[Pass 2: re-import all 24 SetupCore<br/>modules with -Global, REVERSE order]
-    D -->|Yes| F[Assert required functions resolve]
-    E --> F
+    C --> E[Pass 2: re-import all 24 SetupCore<br/>modules with -Global, REVERSE order]
+    E --> F[Assert required functions resolve]
     F -->|missing| G[throw: Engine import incomplete]
     F -->|ok| H[Enable-WindowsHostSpoof<br/>set $env:OS = Windows_NT]
     H --> I[Run the verb]
 ```
 
-Reverse order matters: leaf modules (`Constants`, `Errors`, `Logging`, …) must be
-imported **last** so they land in the global session state instead of inside a
-dependent module. See [Gotchas](#gotchas).
+The nested-import bug that made pass 2 necessary is now **fixed in the source**
+(all 38 nested imports use `-Global`), so a bare `Import-Module Setup-Core.psm1`
+loads all 24 modules. Pass 2 is kept as a cheap belt-and-braces step plus an
+explicit assertion, so a regression fails loudly here instead of halfway through
+a pipeline run.
 
 ### Direct invocation (most PRs need only this)
 
@@ -156,7 +158,7 @@ touching `PythonDiscovery`, `Venv`, or `CodeSigning` needs a Windows host or CI.
 pwsh -NoProfile -File .claude/skills/run-python-venv-automation/driver.ps1 test -SkipSigningTests
 ```
 
-Verified: `Passed=159 Failed=0 Skipped=0`, `Coverage: 73,93%` (gate is 70%).
+Verified: `Passed=395 Failed=0 Skipped=0`, `Coverage: 86,31%` (gate is 70%).
 
 The project's own runner works too and is what CI calls, but it fails off Windows:
 
@@ -165,9 +167,31 @@ pwsh -NoProfile -File ./Run-Tests.ps1 -MinimumCoverage 70
 ```
 
 → `Pester failed: tests=5, containers=0, blocks=0` — the 5 `CodeSigning.Tests.ps1`
-cases. Everything else (159 tests) and the coverage gate pass. Use
-`driver.ps1 test -SkipSigningTests` locally and let CI (`windows-latest`) run the
-full suite.
+cases. Everything else (395 tests) and the coverage gate (`Covered 86,31% / 70%`)
+pass. Use `driver.ps1 test -SkipSigningTests` locally and let CI
+(`windows-latest`) run the full suite.
+
+There is also a Python suite for `scripts/bump-version.py`:
+
+```bash
+.venv/bin/python -m pytest tests/python -q
+```
+
+Verified: `27 passed`.
+
+### End-to-end feature matrix
+
+```bash
+pwsh -NoProfile -File .claude/skills/run-python-venv-automation/driver.ps1 matrix
+```
+
+Verified: `FEATURE MATRIX  PASS=76  FAIL=0  SKIP=6`. It drives package-manager
+detection, Python constraints, project metadata, **real** Safe Git Sync against
+real repositories with real upstreams, project config, structured logging, the
+dry-run pipeline, pyproject health, transactional healing, dependency semantics,
+the doctor/repair/support commands and version bumping. The 6 SKIPs are the
+genuinely Windows-only features, each with a printed reason. Results are written
+to `<workdir>/dummy/feature-matrix.json`.
 
 ## Build
 
@@ -203,15 +227,14 @@ whole engine), `PythonVenvAutomation/docs/`, and
 
 ## Gotchas
 
-- **Importing the engine the obvious way silently half-loads it.** `Import-Module
-  Setup-Core.psm1` leaves only 11 of 24 modules global. `Get-SetupConstants`,
-  `Get-ProjectMetadata`, `New-SetupException` are all missing, and the pipeline
-  dies at `METADATA` with *"The term 'Get-ProjectMetadata' is not recognized"*.
-  Cause: 14 SetupCore modules re-import their dependencies with `-Force` but
-  **without `-Global`** (e.g. `Filesystem.psm1:10` → `Constants.psm1`). `-Force`
-  *relocates* an already-global module into the importer's private session state.
-  `Filesystem` is where it first breaks. Always load via
-  `Import-DevSetupEngine` in the driver, never a bare `Import-Module`.
+- **Nested `-Force` imports without `-Global` de-globalize their dependencies.**
+  `-Force` *relocates* an already-global module into the importer's private
+  session state. This used to leave only 11 of 24 modules reachable, killing the
+  pipeline at `METADATA` with *"The term 'Get-ProjectMetadata' is not
+  recognized"*, and it also created duplicate module instances with **separate
+  caches**. Fixed in the source (all 38 nested imports use `-Global`); keep it
+  that way when adding a module, and load via `Import-DevSetupEngine` anyway so
+  a regression is caught by its assertion.
 
 - **The "Windows-only" guard is one env var.** `Setup-Core.psm1:245` throws
   `PLATFORM_UNSUPPORTED` unless `Get-IsWindows` is true, and `Compat.psm1:83`
@@ -234,15 +257,40 @@ whole engine), `PythonVenvAutomation/docs/`, and
   automation's own git sync defaults to `SkipIfDirty`, this can silently change
   behaviour on a later run. Delete them or add them to `.gitignore`.
 
-- **Detection currently treats bare `[project]` as uv.** `driver.ps1 detect`
-  shows it: a PEP 621-only pyproject and a project with *both* `uv.lock` and
-  `poetry.lock` both resolve to `uv` with reason *"[project] table (PEP 621)
-  present, no [tool.poetry]"*. PEP 621 is tool-neutral, so this is a known
-  correctness gap, not driver noise — use `detect` to verify any fix.
+- **Detection is fail-closed on ambiguity.** A PEP 621-only pyproject, or one
+  with both `uv.lock` and `poetry.lock`, resolves to `Status = Ambiguous` with
+  `PYPROJECT_PM_AMBIGUOUS` / `PYPROJECT_MULTIPLE_LOCKFILES`. Non-interactive
+  callers get a `SetupException`; interactive ones get a prompt. Lock-file
+  mtime is deliberately not a tie-breaker. `driver.ps1 detect` prints all four
+  fixture outcomes.
+
+- **`Exit-WithError` used to hang unattended runs** on `Press Enter to exit`.
+  It now checks `Test-SetupInteractive` (`DEVSETUP_NONINTERACTIVE`, `CI`,
+  `TF_BUILD`, `GITHUB_ACTIONS`, redirected stdin, non-interactive host). Set
+  `DEVSETUP_NONINTERACTIVE=1` for any scripted run.
 
 - **CI is `windows-latest` only** (`.github/workflows/publish.yml`). Treat green
   local runs as a smoke check; the Windows-only paths are only genuinely
   validated there.
+
+### PowerShell traps that caused real bugs here
+
+Each of these produced a working-looking-but-wrong result in this repo and is
+now pinned by a test. `PythonVenvAutomation/docs/MODULE_ARCHITECTURE.md` has the
+same table with more context.
+
+| Trap | Symptom | Fix |
+|---|---|---|
+| `@($genericList)` | throws `Argument types do not match` on PS 7.5.x — even for an empty list | `.ToArray()` |
+| `return , $collection` | pipeline consumers see **one array object**, so `\| ForEach-Object Code` yields `$null`, and `@()` counts an empty result as 1 | return collections unwrapped |
+| `@(Get-Foo)` where `Get-Foo` does `return ,$node` | a 1-element array *containing* the array; a `[string[]]` parameter then flattens it into one joined string | assign first, then `@()` |
+| Mandatory `[string]` / `[string[]]` | rejects `''` and any array containing an empty string (blank lines!) with "because it is an empty string" | `[AllowEmptyString()]` |
+| `$WhatIfPreference` | does **not** cross module boundaries, so `-WhatIf` silently performed real writes | forward explicitly: `-WhatIf:$WhatIfPreference` |
+| `Read-Host` in an error path | blocks an unattended run forever | gate on `Test-SetupInteractive` |
+
+- **The dummy generator writes `pyproject.toml` first on purpose.** A plain
+  `@{}` hashtable has no key order, so lock files could otherwise be written
+  before `pyproject.toml` and trip a spurious `LOCK_OUTDATED`.
 
 ## Troubleshooting
 
@@ -256,3 +304,7 @@ whole engine), `PythonVenvAutomation/docs/`, and
 | `.venv directory was not created` (`VENV_INVALID`) after 10 steps | Expected outcome of a dry run. Not a failure. |
 | `Could not find Command Get-AuthenticodeSignature` (×5) | `CodeSigning.Tests.ps1` off Windows. Use `test -SkipSigningTests`. |
 | `Pester 5 or newer is required` | `Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck` |
+| A run hangs with no output | Something reached `Read-Host`. Re-run with `DEVSETUP_NONINTERACTIVE=1`. |
+| `Argument types do not match` | `@()` around a `List[object]` — use `.ToArray()`. |
+| `Cannot bind argument to parameter 'X' because it is an empty string` | Mandatory `[string[]]` receiving an array with blank entries — add `[AllowEmptyString()]`. |
+| `Mock data are not setup for this scope` | Pester's `Mock`/`InModuleScope` only work inside `Invoke-Pester`; don't call them from a plain script. |

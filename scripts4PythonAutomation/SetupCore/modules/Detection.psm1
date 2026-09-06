@@ -138,7 +138,15 @@ function Resolve-AmbiguousPackageManager {
 
     $code = if ($Report.AmbiguityCode) { $Report.AmbiguityCode } else { 'PYPROJECT_PM_AMBIGUOUS' }
 
-    if ($NonInteractive) {
+    # A prompt is only meaningful when a human can answer it. On a headless
+    # host Read-Host returns $null immediately, which would otherwise burn
+    # three attempts and end in a confusing "no valid selection" error.
+    $mustFail = [bool]$NonInteractive
+    if (-not $mustFail -and (Get-Command Test-SetupInteractive -ErrorAction SilentlyContinue)) {
+        $mustFail = -not (Test-SetupInteractive)
+    }
+
+    if ($mustFail) {
         throw (New-SetupException `
             -Message ("Package manager cannot be determined for '{0}'. {1}. Re-run with -PackageManager uv|poetry, or make the project explicit ([tool.uv] / [tool.poetry])." -f $ProjectRoot, $Report.Reason) `
             -ErrorCode $code `
@@ -160,6 +168,9 @@ function Resolve-AmbiguousPackageManager {
 
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         $answer = Read-Host 'Auswahl (1/2)'
+        # Read-Host yields $null with no console attached, and under
+        # Set-StrictMode -Version Latest that cannot be method-called.
+        if ($null -eq $answer) { $answer = '' }
         switch (([string]$answer).Trim().ToLowerInvariant()) {
             '1'      { return 'uv' }
             'uv'     { return 'uv' }

@@ -224,10 +224,13 @@ function Invoke-DriverDetect {
         New-DriverFixtures -Root $WorkDir | Out-Null
         $targets = @('proj-uv', 'proj-poetry', 'proj-pep621', 'proj-dual') | ForEach-Object { Join-Path $WorkDir $_ }
     }
-    Write-Head 'Resolve-PackageManager'
+    Write-Head 'Get-PmDetectionReport'
+    # The read-only report, not Resolve-PackageManager: resolving an ambiguous
+    # project is a decision, and this verb only ever reports.
     foreach ($t in $targets) {
-        $r = Resolve-PackageManager -CliChoice 'auto' -ProjectRoot $t
-        Write-Host ("{0,-14} -> {1,-7} ({2})" -f (Split-Path $t -Leaf), $r.PackageManager, $r.DetectionReport.Reason)
+        $r = Get-PmDetectionReport -ProjectRoot $t
+        $verdict = if ($r.Status -eq 'Ambiguous') { $r.AmbiguityCode } else { $r.PackageManager }
+        Write-Host ("{0,-14} {1,-10} -> {2,-30} ({3})" -f (Split-Path $t -Leaf), $r.Status, $verdict, $r.Reason)
     }
 }
 
