@@ -1,5 +1,6 @@
 #Requires -Version 5.1
-BeforeAll {
+
+BeforeDiscovery {
     $repoRoot = Split-Path -Parent $PSScriptRoot
     $modulePath = Join-Path $repoRoot 'scripts4PythonAutomation\SetupCore\modules\GitSync.psm1'
     Import-Module $modulePath -Force
