@@ -5,6 +5,14 @@ artifacts/
 # scripts4PythonAutomation/). Never commit the generated copy.
 PythonVenvAutomation/engine/
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Test/coverage output written by Run-Tests.ps1
+test-results.xml
+coverage.xml
+
 # Python virtual environment
 .venv/
 .setup-config.json
