@@ -244,8 +244,19 @@ if (-not $Quiet) { Write-Host "Dummy workspace: $Root" -ForegroundColor Cyan }
 $projectsRoot = New-Dir (Join-Path $Root 'projects')
 foreach ($name in $projects.Keys) {
     $dir = New-Dir (Join-Path $projectsRoot $name)
-    foreach ($file in $projects[$name].Files.Keys) {
+    # pyproject.toml must be written FIRST: a plain hashtable has no defined key
+    # order, so lock files could otherwise end up older than pyproject.toml and
+    # trip a spurious LOCK_OUTDATED finding.
+    $fileNames = @($projects[$name].Files.Keys)
+    foreach ($file in (@($fileNames | Where-Object { $_ -eq 'pyproject.toml' }) + @($fileNames | Where-Object { $_ -ne 'pyproject.toml' }))) {
         Set-File -Path (Join-Path $dir $file) -Content $projects[$name].Files[$file]
+    }
+    # Make the ordering unambiguous even at sub-second filesystem resolution.
+    foreach ($lock in @('uv.lock', 'poetry.lock')) {
+        $lockPath = Join-Path $dir $lock
+        if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+            (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddSeconds(5)
+        }
     }
     Write-Step ("projects/{0} (expect: {1})" -f $name, $projects[$name].Expect)
 }

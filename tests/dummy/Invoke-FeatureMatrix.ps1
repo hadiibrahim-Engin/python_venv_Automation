@@ -48,7 +48,9 @@ function Test-Feature {
     param(
         [Parameter(Mandatory = $true)][string] $Name,
         [Parameter(Mandatory = $true)][scriptblock] $Actual,
-        [Parameter(Mandatory = $true)][string] $Expected
+        # AllowEmptyString: '' is a legitimate expectation ("no findings"),
+        # but a mandatory [string] rejects it.
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Expected
     )
     try {
         $value = [string](& $Actual)
@@ -358,6 +360,92 @@ if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge
         $res = Invoke-Pester -Configuration $cfg
         [string]($res.FailedCount -eq 0 -and $res.PassedCount -ge 7)
     }
+}
+
+# ---------------------------------------------------------------------------
+# 8b. pyproject health and healing (Parts I / K / Q)
+# ---------------------------------------------------------------------------
+Set-Group 'pyproject health (Parts I / K)'
+
+$healthCases = @(
+    @{ Project = 'uv-project';        Expected = '' }
+    @{ Project = 'poetry-project';    Expected = '' }
+    @{ Project = 'pep621-only';       Expected = 'PYPROJECT_PM_AMBIGUOUS' }
+    @{ Project = 'dual-lock';         Expected = 'PYPROJECT_MULTIPLE_LOCKFILES' }
+    @{ Project = 'malformed';         Expected = 'PYPROJECT_PARSE_INVALID' }
+    @{ Project = 'requirements-only'; Expected = 'PYPROJECT_MISSING' }
+    @{ Project = 'bad-constraint';    Expected = 'PYPROJECT_PYTHON_CONSTRAINT_INVALID,LOCK_MISSING' }
+    @{ Project = 'no-version';        Expected = 'PYPROJECT_VERSION_MISSING,LOCK_MISSING' }
+    @{ Project = 'diverged-meta';     Expected = 'PYPROJECT_METADATA_DIVERGED,PYPROJECT_POETRY_METADATA_LEGACY,LOCK_MISSING' }
+)
+foreach ($case in $healthCases) {
+    $dir = Join-Path $Projects $case.Project
+    Test-Feature -Name ("health {0}" -f $case.Project) -Expected $case.Expected -Actual {
+        Clear-PyProjectHealthCache
+        $r = Get-PyProjectHealthReport -ProjectRoot $dir
+        ($r.Findings | ForEach-Object Code) -join ','
+    }.GetNewClosure()
+}
+
+Test-Feature -Name 'doctor-style read is non-mutating' -Expected 'True' -Actual {
+    $dir = Join-Path $Projects 'diverged-meta'
+    $before = Get-FileHash -LiteralPath (Join-Path $dir 'pyproject.toml') -Algorithm SHA256
+    Clear-PyProjectHealthCache
+    Get-PyProjectHealthReport -ProjectRoot $dir | Out-Null
+    Test-PyProjectHealth -ProjectRoot $dir -NoCache | Out-Null
+    Test-PyProjectLockHealth -ProjectRoot $dir -PackageManager 'poetry' | Out-Null
+    $after = Get-FileHash -LiteralPath (Join-Path $dir 'pyproject.toml') -Algorithm SHA256
+    [string]($before.Hash -eq $after.Hash)
+}
+
+Set-Group 'pyproject healing (Part Q)'
+
+$healRoot = Join-Path $Root 'heal'
+if (Test-Path -LiteralPath $healRoot) { Remove-Item -LiteralPath $healRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $healRoot -Force | Out-Null
+$healToml = @"
+[project]
+name = "healme"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31", "Requests", "rich"]
+
+[tool.uv]
+dev-dependencies = ["pytest", "ruff"]
+"@
+Set-Content -LiteralPath (Join-Path $healRoot 'pyproject.toml') -Value $healToml -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $healRoot 'uv.lock') -Value 'lock' -Encoding UTF8
+
+Test-Feature -Name 'WhatIf healing changes nothing' -Expected 'True' -Actual {
+    Clear-PyProjectHealthCache
+    $before = (Get-FileHash -LiteralPath (Join-Path $healRoot 'pyproject.toml') -Algorithm SHA256).Hash
+    Invoke-PyProjectHealing -ProjectRoot $healRoot -WhatIf | Out-Null
+    [string]($before -eq (Get-FileHash -LiteralPath (Join-Path $healRoot 'pyproject.toml') -Algorithm SHA256).Hash)
+}
+
+Test-Feature -Name 'applies both safe fixes' -Expected 'PYPROJECT_DUPLICATE_DEPENDENCY,PYPROJECT_LEGACY_UV_DEV_DEPENDENCIES' -Actual {
+    Clear-PyProjectHealthCache
+    $script:healResult = Invoke-PyProjectHealing -ProjectRoot $healRoot -Confirm:$false
+    ($script:healResult.Applied | ForEach-Object Code) -join ','
+}
+
+Test-Feature -Name 'result is still valid TOML with both dep lists intact' -Expected 'requests>=2.31|rich :: pytest|ruff' -Actual {
+    Clear-PyProjectHealthCache
+    $m = (Get-PyProjectHealthReport -ProjectRoot $healRoot).Metadata
+    "{0} :: {1}" -f ($m.RuntimeDependencies -join '|'), ($m.DevDependencies -join '|')
+}
+
+Test-Feature -Name 'a backup of the original was written' -Expected 'True' -Actual {
+    [string]($script:healResult.BackupPath -and (Test-Path -LiteralPath $script:healResult.BackupPath))
+}
+
+Test-Feature -Name 'lock file was not touched by pyproject healing' -Expected 'lock' -Actual {
+    (Get-Content -LiteralPath (Join-Path $healRoot 'uv.lock') -Raw).Trim()
+}
+
+Test-Feature -Name 'healing is idempotent (second run is a no-op)' -Expected 'False' -Actual {
+    Clear-PyProjectHealthCache
+    [string](Invoke-PyProjectHealing -ProjectRoot $healRoot -Confirm:$false).Changed
 }
 
 # ---------------------------------------------------------------------------
