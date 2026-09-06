@@ -70,9 +70,10 @@ function Invoke-SetupModeSelection {
         throw (New-SetupException -Message 'Interactive setup input is unexpectedly long.' -ErrorCode 'INPUT_TOO_LONG' -Step 'MODE' -Context @{})
     }
 
-    if ($inputText.ToLowerInvariant() -in @('u','update','update-venv','venv-update','refresh-venv')) {
+    $normalized = $inputText.ToLowerInvariant()
+    if ($normalized -in @('u','update','update-venv','venv-update','refresh-venv')) {
         $Ctx.Mode = 'update-venv'
-    } elseif ($inputText.ToLowerInvariant() -in @('l','list')) {
+    } elseif ($normalized -in @('l','list')) {
         $Ctx.ListMode = $true
     } elseif (-not [string]::IsNullOrWhiteSpace($inputText)) {
         $candidate = $inputText.Trim('"').Trim("'")
@@ -82,7 +83,8 @@ function Invoke-SetupModeSelection {
 }
 
 function New-SetupLoggingCallbacks {
-    [CmdletBinding()] param()
+    [CmdletBinding()]
+    param()
 
     [pscustomobject]@{
         OnStart = {
@@ -191,9 +193,9 @@ function Start-Setup {
     Executes the Python environment setup pipeline.
 
 .DESCRIPTION
-    The setup process is now an ordered pipeline of named, independently
-    testable steps. `-WhatIf` is treated like `-DryRun` for mutating pipeline
-    steps, while read-only discovery/precheck steps continue to run.
+    The setup process is an ordered pipeline of named, independently testable
+    steps. `-WhatIf` is treated like `-DryRun` for mutating pipeline steps,
+    while read-only discovery/precheck steps continue to run.
 
 .EXAMPLE
     Start-Setup -ProjectRoot C:\src\project
@@ -241,9 +243,6 @@ function Start-Setup {
             throw (New-SetupException -Message 'This setup automation is Windows-only.' -ErrorCode 'PLATFORM_UNSUPPORTED' -Step 'INIT' -Context @{})
         }
 
-        # DigiCert path is validated immediately before setup state is touched.
-        # No silent fallback is allowed when neither the configured path nor the
-        # default installation exists.
         if (-not (Test-Path -LiteralPath $DigiCertUtilityExe -PathType Leaf)) {
             throw (New-SetupException -Message 'DigiCert Utility not found. Please install or set environment variable.' -ErrorCode 'DIGICERT_NOT_FOUND' -Step 'INIT' -Context @{ DigiCertUtilityExe = $DigiCertUtilityExe })
         }
@@ -274,7 +273,6 @@ function Start-Setup {
             -UpgradePackages $UpgradePackages
 
         $callbacks = New-SetupLoggingCallbacks
-
         $detectStep = New-SetupPipelineStep -Name 'DETECT' -Module 'Detection' -Message 'Detect package manager from project files' -ReadOnly -ErrorCode 'PM_DETECTION_FAILED' -Action {
             Invoke-PackageManagerDetectionStep -Ctx $ctx
         }
@@ -290,8 +288,7 @@ function Start-Setup {
                 Invoke-ExistingVenvUpdateStep -Ctx $ctx -SignPoetryOnly:$SignPoetryOnly
             }
             Invoke-SetupPipelineStep -Step $updateStep -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
-        }
-        else {
+        } else {
             $steps = New-FullSetupPipeline -Ctx $ctx -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning:$KernelDriverSigning -RequirePmShimSigning:$RequirePmShimSigning -StopOnPrecheckFailure:$StopOnPrecheckFailure -SignPoetryOnly:$SignPoetryOnly -DryRun:$effectiveDryRun
             Invoke-SetupPipeline -Steps $steps -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
         }
@@ -303,7 +300,8 @@ function Start-Setup {
         }
 
         Write-StructuredLog -Level INFO -Step 'DONE' -Module 'Core' -Message 'Setup completed.' -Context @{ Mode = $ctx.Mode } -NoConsole
-        Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message (if ($effectiveDryRun) { 'Dry run completed' } else { 'Setup completed successfully' })
+        $doneMessage = if ($effectiveDryRun) { 'Dry run completed' } else { 'Setup completed successfully' }
+        Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message $doneMessage
 
         if (-not $effectiveDryRun) {
             try { Invoke-VenvActivation -ProjectRoot $ctx.ProjectRoot } catch { Write-Warning $_.Exception.Message }
