@@ -30,10 +30,17 @@ Describe 'Write-SetupConfig' {
     It 'can continue interactively without persistence only after explicit yes' {
         $root = Join-Path $TestDrive 'project3'
         New-Item -ItemType Directory -Path $root | Out-Null
-        InModuleScope Config -Parameters @{ Root=$root } {
-            Mock Set-Content { throw 'read only' }
-            Mock Read-Host { 'yes' }
-            Write-SetupConfig -ProjectRoot $Root -Values @{ PackageManager='poetry' } -Confirm:$false | Should -BeFalse
+        $oldCi = $env:CI
+        try {
+            $env:CI = $null
+            InModuleScope Config -Parameters @{ Root=$root } {
+                Mock Set-Content { throw 'read only' }
+                Mock Read-Host { 'yes' }
+                Write-SetupConfig -ProjectRoot $Root -Values @{ PackageManager='poetry' } -Confirm:$false | Should -BeFalse
+            }
+        }
+        finally {
+            $env:CI = $oldCi
         }
     }
 }
