@@ -127,62 +127,65 @@ function New-FullSetupPipeline {
     $steps.Add((New-SetupPipelineStep -Name 'METADATA' -Module 'Toml' -Message 'Parse project metadata' -ReadOnly -ErrorCode 'PROJECT_METADATA_FAILED' -Action {
         Invoke-ProjectMetadataStep -Ctx $Ctx | Out-Null
     }))
-    $steps.Add((New-SetupPipelineStep -Name 'PYTHON' -Module 'PythonDiscovery' -Message 'Resolve compatible Python interpreter' -ReadOnly -ErrorCode 'PYTHON_RESOLUTION_FAILED' -Action {
-        Invoke-PythonDetectionStep -Ctx $Ctx | Out-Null
+    # Python resolution is intentionally mutating-capable because it may install
+    # Python when AllowPythonInstall is true. Therefore it is NOT ReadOnly and
+    # is skipped by DryRun/WhatIf.
+    $steps.Add((New-SetupPipelineStep -Name 'PYTHON' -Module 'PythonDiscovery' -Message 'Resolve compatible Python interpreter' -ErrorCode 'PYTHON_RESOLUTION_FAILED' -Action {
+        Invoke-PythonDetectionStep -Ctx $Ctx -Confirm:$false | Out-Null
         if ($Ctx.EnableCodeSigning -and -not $DryRun) {
             Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
         }
     }))
     $steps.Add((New-SetupPipelineStep -Name 'PM-RUNTIME' -Module 'PackageManager' -Message 'Ensure package-manager runtime' -ErrorCode 'PM_RUNTIME_FAILED' -Action {
-        Invoke-PackageManagerRuntimeStep -Ctx $Ctx | Out-Null
+        Invoke-PackageManagerRuntimeStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'PM-SIGN' -Module 'CodeSigning' -Message 'Validate/sign package-manager executable' -Mandatory:$RequirePmShimSigning -ErrorCode 'PM_SIGNING_FAILED' -Action {
-        Invoke-PackageManagerSigningStep -Ctx $Ctx -RequirePmShimSigning:$RequirePmShimSigning | Out-Null
+        Invoke-PackageManagerSigningStep -Ctx $Ctx -RequirePmShimSigning:$RequirePmShimSigning -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'PM-CONFIG' -Module 'PackageManager' -Message 'Configure package-manager defaults' -ErrorCode 'PM_CONFIG_FAILED' -Action {
-        Invoke-PackageManagerConfigureStep -Ctx $Ctx | Out-Null
+        Invoke-PackageManagerConfigureStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'PM-CLEAN' -Module 'PackageManager' -Message 'Clean stale environment associations' -Mandatory:$false -ErrorCode 'PM_CLEANUP_FAILED' -Action {
-        Invoke-PackageManagerCleanupStep -Ctx $Ctx | Out-Null
+        Invoke-PackageManagerCleanupStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     if ($Ctx.ForceRecreateVenv) {
         $steps.Add((New-SetupPipelineStep -Name 'VENV-BACKUP' -Module 'Venv' -Message 'Backup and remove existing .venv' -ErrorCode 'VENV_BACKUP_FAILED' -Action {
-            Invoke-VenvBackupStep -Ctx $Ctx | Out-Null
+            Invoke-VenvBackupStep -Ctx $Ctx -Confirm:$false | Out-Null
         }))
     }
     $steps.Add((New-SetupPipelineStep -Name 'VENV-PREPARE' -Module 'Venv' -Message 'Prepare project virtual environment' -ErrorCode 'VENV_PREPARE_FAILED' -Action {
-        Invoke-VenvPrepareStep -Ctx $Ctx | Out-Null
+        Invoke-VenvPrepareStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'VENV-VALIDATE' -Module 'Venv' -Message 'Validate virtual environment' -ReadOnly -ErrorCode 'VENV_INVALID' -Action {
         Invoke-VenvValidationStep -Ctx $Ctx
     }))
     $steps.Add((New-SetupPipelineStep -Name 'VENV-RUNTIME' -Module 'Venv' -Message 'Copy Python runtime DLL' -ErrorCode 'VENV_RUNTIME_COPY_FAILED' -Action {
-        Invoke-VenvRuntimeCopyStep -Ctx $Ctx
+        Invoke-VenvRuntimeCopyStep -Ctx $Ctx -Confirm:$false
     }))
     $steps.Add((New-SetupPipelineStep -Name 'LOCK' -Module 'PackageManager' -Message 'Synchronize dependency lock state' -ErrorCode 'LOCK_SYNC_FAILED' -Action {
-        Invoke-LockSyncStep -Ctx $Ctx | Out-Null
+        Invoke-LockSyncStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'DEPENDENCIES' -Module 'PackageManager' -Message 'Install/update project dependencies' -ErrorCode 'DEPENDENCY_INSTALL_FAILED' -Action {
-        Invoke-DependencyInstallStep -Ctx $Ctx | Out-Null
+        Invoke-DependencyInstallStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'VENV-PATH' -Module 'Path' -Message 'Persist project .venv CLI tools on PATH' -Mandatory:$false -ErrorCode 'PATH_UPDATE_FAILED' -Action {
-        Invoke-VenvPathStep -Ctx $Ctx
+        Invoke-VenvPathStep -Ctx $Ctx -Confirm:$false
     }))
     $steps.Add((New-SetupPipelineStep -Name 'PROJECT-PTH' -Module 'Venv' -Message 'Write project .pth into site-packages' -ErrorCode 'PTH_WRITE_FAILED' -Action {
-        Invoke-ProjectPthStep -Ctx $Ctx | Out-Null
+        Invoke-ProjectPthStep -Ctx $Ctx -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'VSCODE' -Module 'VSCode' -Message 'Pin venv interpreter in VS Code settings' -ErrorCode 'VSCODE_WRITE_FAILED' -Action {
-        Invoke-VSCodeStep -Ctx $Ctx
+        Invoke-VSCodeStep -Ctx $Ctx -Confirm:$false
     }))
     $steps.Add((New-SetupPipelineStep -Name 'TCL' -Module 'Tcl' -Message 'Copy Tcl runtime into .venv' -Mandatory:$false -ErrorCode 'TCL_COPY_FAILED' -Action {
-        Invoke-TclStep -Ctx $Ctx
+        Invoke-TclStep -Ctx $Ctx -Confirm:$false
     }))
     $steps.Add((New-SetupPipelineStep -Name 'SMART-SIGNING' -Module 'CodeSigning' -Message 'Validate signatures and sign only new/changed binaries' -Mandatory:$false -ErrorCode 'VENV_SIGNING_FAILED' -Action {
-        Invoke-SmartSigningStep -Ctx $Ctx -SignPoetryOnly:$SignPoetryOnly | Out-Null
+        Invoke-SmartSigningStep -Ctx $Ctx -SignPoetryOnly:$SignPoetryOnly -Confirm:$false | Out-Null
     }))
     $steps.Add((New-SetupPipelineStep -Name 'CLEANUP' -Module 'Filesystem' -Message 'Clean stale quarantine and backup directories' -Mandatory:$false -ErrorCode 'CLEANUP_FAILED' -Action {
-        Invoke-StaleCleanupStep -Ctx $Ctx | Out-Null
-        Invoke-VenvBackupCleanupStep -Ctx $Ctx
+        Invoke-StaleCleanupStep -Ctx $Ctx -Confirm:$false | Out-Null
+        Invoke-VenvBackupCleanupStep -Ctx $Ctx -Confirm:$false
     }))
     @($steps)
 }
@@ -214,7 +217,7 @@ function Start-Setup {
         [Parameter()][string] $PythonExePath,
         [Parameter()][bool] $NonInteractive = $false,
         [Parameter()][bool] $EnableCodeSigning = $true,
-        [Parameter()][ValidateNotNullOrEmpty()][string] $DigiCertUtilityExe = $(if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe' }),
+        [Parameter()][string] $DigiCertUtilityExe = '',
         [Parameter()][bool] $KernelDriverSigning = $false,
         [Parameter()][bool] $SignPoetryOnly = $false,
         [Parameter()][bool] $RequirePmShimSigning = $true,
@@ -243,6 +246,10 @@ function Start-Setup {
             throw (New-SetupException -Message 'This setup automation is Windows-only.' -ErrorCode 'PLATFORM_UNSUPPORTED' -Step 'INIT' -Context @{})
         }
 
+        $constants = Get-SetupConstants
+        if (-not $DigiCertUtilityExe) {
+            $DigiCertUtilityExe = if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { [string]$constants.CodeSigning.DefaultDigiCertUtilityExe }
+        }
         if (-not (Test-Path -LiteralPath $DigiCertUtilityExe -PathType Leaf)) {
             throw (New-SetupException -Message 'DigiCert Utility not found. Please install or set environment variable.' -ErrorCode 'DIGICERT_NOT_FOUND' -Step 'INIT' -Context @{ DigiCertUtilityExe = $DigiCertUtilityExe })
         }
@@ -281,11 +288,11 @@ function Start-Setup {
         Invoke-SetupModeSelection -Ctx $ctx
 
         if ($ctx.Mode -in @('update-venv','venv-update','refresh-venv')) {
-            if ($ctx.EnableCodeSigning) {
+            if ($ctx.EnableCodeSigning -and -not $effectiveDryRun) {
                 Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
             }
             $updateStep = New-SetupPipelineStep -Name 'UPDATE-VENV' -Module 'Venv' -Message 'Refresh existing .venv and validate signing state' -ErrorCode 'VENV_UPDATE_FAILED' -Action {
-                Invoke-ExistingVenvUpdateStep -Ctx $ctx -SignPoetryOnly:$SignPoetryOnly
+                Invoke-ExistingVenvUpdateStep -Ctx $ctx -SignPoetryOnly:$SignPoetryOnly -Confirm:$false
             }
             Invoke-SetupPipelineStep -Step $updateStep -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
         } else {
@@ -296,7 +303,7 @@ function Start-Setup {
         if (-not $effectiveDryRun) {
             $configValues = @{ PinnedPoetryVersion = $ctx.PinnedPoetryVersion; PinnedUvVersion = $ctx.PinnedUvVersion }
             if ($ctx.PmSource -eq 'cli') { $configValues.PackageManager = $ctx.PackageManager }
-            Write-SetupConfig -ProjectRoot $ctx.ProjectRoot -Values $configValues -NonInteractive:$ctx.NonInteractive | Out-Null
+            Write-SetupConfig -ProjectRoot $ctx.ProjectRoot -Values $configValues -NonInteractive:$ctx.NonInteractive -Confirm:$false | Out-Null
         }
 
         Write-StructuredLog -Level INFO -Step 'DONE' -Module 'Core' -Message 'Setup completed.' -Context @{ Mode = $ctx.Mode } -NoConsole
