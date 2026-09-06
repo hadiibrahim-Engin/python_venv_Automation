@@ -12,55 +12,28 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 function New-SetupPipelineStep {
 <#
 .SYNOPSIS
-    Creates one immutable-style setup pipeline step definition.
-
-.DESCRIPTION
-    Step definitions contain only metadata and an Action scriptblock. Execution,
-    timing, dry-run behavior and exception normalization belong to
-    Invoke-SetupPipelineStep.
-
-.EXAMPLE
-    $step = New-SetupPipelineStep -Name 'PYTHON' -Module 'Python' `
-        -Message 'Resolve Python' -ReadOnly -Action { Resolve-Python }
+    Creates one setup pipeline step definition.
 #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Name,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Module,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Message,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [scriptblock] $Action,
-
-        [Parameter()]
-        [bool] $Mandatory = $true,
-
-        [Parameter()]
-        [switch] $ReadOnly,
-
-        [Parameter()]
-        [ValidateNotNullOrEmpty()]
-        [string] $ErrorCode = 'SETUP_STEP_FAILED'
+        [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $Name,
+        [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $Module,
+        [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $Message,
+        [Parameter(Mandatory=$true)][ValidateNotNull()][scriptblock] $Action,
+        [Parameter()][bool] $Mandatory = $true,
+        [Parameter()][switch] $ReadOnly,
+        [Parameter()][ValidateNotNullOrEmpty()][string] $ErrorCode = 'SETUP_STEP_FAILED'
     )
 
     [pscustomobject]@{
         PSTypeName = 'PythonVenvAutomation.SetupPipelineStep'
-        Name       = $Name
-        Module     = $Module
-        Message    = $Message
-        Action     = $Action
-        Mandatory  = [bool]$Mandatory
-        ReadOnly   = [bool]$ReadOnly
-        ErrorCode  = $ErrorCode
+        Name = $Name
+        Module = $Module
+        Message = $Message
+        Action = $Action
+        Mandatory = [bool]$Mandatory
+        ReadOnly = [bool]$ReadOnly
+        ErrorCode = $ErrorCode
     }
 }
 
@@ -68,54 +41,19 @@ function Invoke-SetupPipelineStep {
 <#
 .SYNOPSIS
     Executes one setup pipeline step with timing and normalized error handling.
-
-.DESCRIPTION
-    This helper is intentionally independent of UI.psm1. Callers can supply
-    optional callbacks for start/result/detail logging, which keeps the pipeline
-    primitive testable and lets the existing Setup-Core console format remain
-    unchanged during migration.
-
-.PARAMETER DryRun
-    Skips mutating steps while allowing ReadOnly steps to execute.
-
-.PARAMETER OnStart
-    Optional callback receiving the step object.
-
-.PARAMETER OnResult
-    Optional callback receiving: step, status, message, durationSeconds.
-
-.PARAMETER OnDetail
-    Optional callback receiving: key, value.
-
-.EXAMPLE
-    Invoke-SetupPipelineStep -Step $step -DryRun:$false
 #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [psobject] $Step,
-
-        [Parameter()]
-        [switch] $DryRun,
-
-        [Parameter()]
-        [scriptblock] $OnStart,
-
-        [Parameter()]
-        [scriptblock] $OnResult,
-
-        [Parameter()]
-        [scriptblock] $OnDetail
+        [Parameter(Mandatory=$true)][ValidateNotNull()][psobject] $Step,
+        [Parameter()][switch] $DryRun,
+        [Parameter()][scriptblock] $OnStart,
+        [Parameter()][scriptblock] $OnResult,
+        [Parameter()][scriptblock] $OnDetail
     )
 
-    foreach ($required in @('Name', 'Module', 'Message', 'Action', 'Mandatory', 'ReadOnly', 'ErrorCode')) {
+    foreach ($required in @('Name','Module','Message','Action','Mandatory','ReadOnly','ErrorCode')) {
         if ($Step.PSObject.Properties.Name -notcontains $required) {
-            throw (New-SetupException `
-                -Message "Invalid pipeline step: missing property '$required'." `
-                -ErrorCode 'PIPELINE_STEP_INVALID' `
-                -Step 'PIPELINE' `
-                -Context @{ MissingProperty = $required })
+            throw (New-SetupException -Message "Invalid pipeline step: missing property '$required'." -ErrorCode 'PIPELINE_STEP_INVALID' -Step 'PIPELINE' -Context @{ MissingProperty=$required })
         }
     }
 
@@ -123,63 +61,24 @@ function Invoke-SetupPipelineStep {
 
     if ($DryRun -and -not [bool]$Step.ReadOnly) {
         if ($OnResult) { & $OnResult $Step 'SKIPPED' 'Dry-run: mutating step skipped.' 0.0 }
-        return [pscustomobject]@{
-            Step        = $Step.Name
-            Status      = 'SKIPPED'
-            DurationSec = 0.0
-            Result      = $null
-        }
+        return [pscustomobject]@{ Step=$Step.Name; Status='SKIPPED'; DurationSec=0.0; Result=$null }
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $result = & $Step.Action
         $sw.Stop()
-
-        if ($OnResult) {
-            & $OnResult $Step 'OK' $Step.Message $sw.Elapsed.TotalSeconds
-        }
-
-        return [pscustomobject]@{
-            Step        = $Step.Name
-            Status      = 'OK'
-            DurationSec = $sw.Elapsed.TotalSeconds
-            Result      = $result
-        }
+        if ($OnResult) { & $OnResult $Step 'OK' $Step.Message $sw.Elapsed.TotalSeconds }
+        return [pscustomobject]@{ Step=$Step.Name; Status='OK'; DurationSec=$sw.Elapsed.TotalSeconds; Result=$result }
     }
     catch {
         $sw.Stop()
-
-        $context = @{
-            Module = [string]$Step.Module
-            Message = [string]$Step.Message
-        }
-        $setupError = ConvertTo-SetupException `
-            -ErrorRecord $_ `
-            -ErrorCode ([string]$Step.ErrorCode) `
-            -Step ([string]$Step.Name) `
-            -Context $context
-
+        $setupError = ConvertTo-SetupException -ErrorRecord $_ -ErrorCode ([string]$Step.ErrorCode) -Step ([string]$Step.Name) -Context @{ Module=[string]$Step.Module; Message=[string]$Step.Message }
         $status = if ([bool]$Step.Mandatory) { 'ERROR' } else { 'WARN' }
-        if ($OnResult) {
-            & $OnResult $Step $status $setupError.Message $sw.Elapsed.TotalSeconds
-        }
-        if ($OnDetail) {
-            & $OnDetail 'error_code' $setupError.ErrorCode
-            & $OnDetail 'step' $setupError.Step
-        }
-
-        if ([bool]$Step.Mandatory) {
-            throw $setupError
-        }
-
-        return [pscustomobject]@{
-            Step        = $Step.Name
-            Status      = 'WARN'
-            DurationSec = $sw.Elapsed.TotalSeconds
-            Result      = $null
-            Error       = $setupError
-        }
+        if ($OnResult) { & $OnResult $Step $status $setupError.Message $sw.Elapsed.TotalSeconds }
+        if ($OnDetail) { & $OnDetail 'error_code' $setupError.ErrorCode; & $OnDetail 'step' $setupError.Step }
+        if ([bool]$Step.Mandatory) { throw $setupError }
+        return [pscustomobject]@{ Step=$Step.Name; Status='WARN'; DurationSec=$sw.Elapsed.TotalSeconds; Result=$null; Error=$setupError }
     }
 }
 
@@ -188,44 +87,28 @@ function Invoke-SetupPipeline {
 .SYNOPSIS
     Executes an ordered collection of setup pipeline step definitions.
 
-.DESCRIPTION
-    Stops automatically when a mandatory step throws. Optional-step failures are
-    returned as WARN results and execution continues.
-
 .EXAMPLE
     Invoke-SetupPipeline -Steps $steps -DryRun:$false
 #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [object[]] $Steps,
-
-        [Parameter()]
-        [switch] $DryRun,
-
-        [Parameter()]
-        [scriptblock] $OnStart,
-
-        [Parameter()]
-        [scriptblock] $OnResult,
-
-        [Parameter()]
-        [scriptblock] $OnDetail
+        [Parameter(Mandatory=$true)][ValidateNotNull()][object[]] $Steps,
+        [Parameter()][switch] $DryRun,
+        [Parameter()][scriptblock] $OnStart,
+        [Parameter()][scriptblock] $OnResult,
+        [Parameter()][scriptblock] $OnDetail
     )
 
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($step in $Steps) {
-        $result = Invoke-SetupPipelineStep `
-            -Step $step `
-            -DryRun:$DryRun `
-            -OnStart $OnStart `
-            -OnResult $OnResult `
-            -OnDetail $OnDetail
-        $results.Add($result)
+        $result = Invoke-SetupPipelineStep -Step $step -DryRun:$DryRun -OnStart $OnStart -OnResult $OnResult -OnDetail $OnDetail
+        [void]$results.Add($result)
     }
 
-    @($results)
+    # Windows PowerShell 5.1 can throw an ArgumentException when an array
+    # subexpression is applied directly to a generic List[object]. Copy the
+    # elements explicitly into a normal PowerShell object array instead.
+    return [object[]]$results.ToArray()
 }
 
 Export-ModuleMember -Function New-SetupPipelineStep, Invoke-SetupPipelineStep, Invoke-SetupPipeline
