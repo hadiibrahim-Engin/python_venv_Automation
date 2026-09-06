@@ -1,196 +1,116 @@
 #Requires -Version 5.1
 # =============================================================================
 # Module  : Prechecks.psm1
-
-# Author  : Hadi Ibrahim
+# Purpose : Pre-setup diagnostics using centralized defaults.
 # =============================================================================
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-<#
-.SYNOPSIS
-    Pre-setup diagnostic checks run before the main pipeline starts.
-
-.DESCRIPTION
-    Each check returns a result object.  The orchestrator (Start-Setup) calls
-    Invoke-Prechecks and decides whether to continue or abort based on the
-    returned ContinueSetup flag.
-
-    Critical failures, including missing DigiCert, stop
-    setup before any mutation. Non-critical diagnostics warn and continue.
-#>
-
-
-# ---------------------------------------------------------------------------
-# Individual checks
-# ---------------------------------------------------------------------------
+$import = 'Microsoft.PowerShell.Core\Import-Module'
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Constants.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
 function Test-NetworkAccess {
 <#
 .SYNOPSIS
     Verifies that at least one relevant network endpoint is reachable via TCP.
 
-.DESCRIPTION
-    Attempts a TCP connection to each of the supplied host:port pairs.
-    Returns a check result object - passes when at least one endpoint responds.
-    Fails non-critically: setup continues but a warning is shown and any steps
-    that require internet access receive an early, clear diagnosis.
-
-.PARAMETER Endpoints
-    Array of hashtables, each with 'Host' and 'Port' keys.
-    Defaults to PyPI and the UV / Poetry installer endpoints.
-
-.PARAMETER TimeoutMs
-    Per-endpoint TCP connect timeout in milliseconds. Default 3000.
+.EXAMPLE
+    Test-NetworkAccess
 #>
+    [CmdletBinding()]
     param(
         [hashtable[]] $Endpoints = @(
-            @{ Host = 'pypi.org';             Port = 443 },
+            @{ Host = 'pypi.org'; Port = 443 },
             @{ Host = 'files.pythonhosted.org'; Port = 443 },
-            @{ Host = 'www.python.org';       Port = 443 }
+            @{ Host = 'www.python.org'; Port = 443 }
         ),
-        [int] $TimeoutMs = 3000
+        [int] $TimeoutMs = 0
     )
 
-    # Phase 1 — fire all TCP connections before waiting on any.
-    # This ensures the I/O overlaps; total wall-clock is bounded by TimeoutMs,
-    # not N × TimeoutMs as with a sequential foreach.
+    if ($TimeoutMs -le 0) {
+        $TimeoutMs = [int](Get-SetupConstants).Network.ProbeTimeoutMs
+    }
+
     $probes = foreach ($ep in $Endpoints) {
         $label = "$($ep.Host):$($ep.Port)"
         try {
             $tcp = New-Object System.Net.Sockets.TcpClient
-            $ar  = $tcp.BeginConnect($ep.Host, $ep.Port, $null, $null)
-            [pscustomobject]@{ Label = $label; Tcp = $tcp; Ar = $ar; Ok = $false; Done = $false }
+            $ar = $tcp.BeginConnect($ep.Host, $ep.Port, $null, $null)
+            [pscustomobject]@{ Label=$label; Tcp=$tcp; Ar=$ar; Done=$false }
         } catch {
-            [pscustomobject]@{ Label = $label; Tcp = $null; Ar = $null; Ok = $false; Done = $true }
+            [pscustomobject]@{ Label=$label; Tcp=$null; Ar=$null; Done=$true }
         }
     }
 
-    # Phase 2 — collect results against a shared deadline.
-    $deadline    = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
-    $reachable   = @()
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    $reachable = @()
     $unreachable = @()
-
     foreach ($probe in $probes) {
-        if ($probe.Done) { $unreachable += $probe.Label; continue }   # failed to even start
-
+        if ($probe.Done) { $unreachable += $probe.Label; continue }
         $remaining = [int][Math]::Max(0, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-        $ok        = $probe.Ar.AsyncWaitHandle.WaitOne($remaining, $false)
+        $ok = $probe.Ar.AsyncWaitHandle.WaitOne($remaining, $false)
         try { $probe.Tcp.Close() } catch { }
-
-        if ($ok) { $reachable   += $probe.Label }
-        else      { $unreachable += $probe.Label }
+        if ($ok) { $reachable += $probe.Label } else { $unreachable += $probe.Label }
     }
 
     $passed = ($reachable.Count -gt 0)
-    $msg    = if ($passed) {
-        "Network OK. Reached: $($reachable -join ', ')"
-    } else {
-        "No internet endpoints reachable. Tried: $($unreachable -join ', ')"
-    }
-
-    return [pscustomobject]@{
-        Check    = 'Network'
-        Passed   = $passed
-        Critical = $false    # non-critical: setup continues; error surfaces at install step
-        Message  = $msg
-        Fix      = if (-not $passed) { 'Check proxy / firewall settings. VPN may be required.' } else { $null }
-        AutoFix  = if (-not $passed) { { param($ctx) $ctx.NetworkAvailable = $false } } else { $null }
+    [pscustomobject]@{
+        Check = 'Network'
+        Passed = $passed
+        Critical = $false
+        Message = if ($passed) { "Network OK. Reached: $($reachable -join ', ')" } else { "No internet endpoints reachable. Tried: $($unreachable -join ', ')" }
+        Fix = if (-not $passed) { 'Check proxy / firewall settings. VPN may be required.' } else { $null }
+        AutoFix = if (-not $passed) { { param($ctx) $ctx.NetworkAvailable = $false } } else { $null }
     }
 }
 
 function Test-DigiCertAvailable {
-<#
-.SYNOPSIS
-    Verifies that the DigiCert utility executable exists at the expected path.
-
-.OUTPUTS
-    PSCustomObject { Check; Passed; Critical; Message; Fix; AutoFix }
-    DigiCert is required infrastructure, so missing DigiCert is always critical.
-#>
-    param([Parameter(Mandatory=$true)][string] $DigiCertExe)
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $DigiCertExe)
 
     if (Test-Path -LiteralPath $DigiCertExe -PathType Leaf) {
-        return [pscustomobject]@{
-            Check    = 'DigiCert'
-            Passed   = $true
-            Critical = $true
-            Message  = "DigiCert utility found: $DigiCertExe"
-            Fix      = $null
-            AutoFix  = $null
-        }
+        return [pscustomobject]@{ Check='DigiCert'; Passed=$true; Critical=$true; Message="DigiCert utility found: $DigiCertExe"; Fix=$null; AutoFix=$null }
     }
 
-    return [pscustomobject]@{
-        Check    = 'DigiCert'
-        Passed   = $false
+    [pscustomobject]@{
+        Check = 'DigiCert'
+        Passed = $false
         Critical = $true
-        Message  = "DigiCert utility NOT found at: $DigiCertExe"
-        Fix      = "Install DigiCert Utility at the configured path, or pass -DigiCertUtilityExe with the correct path."
-        AutoFix  = $null
+        Message = "DigiCert utility NOT found at: $DigiCertExe"
+        Fix = 'Install DigiCert Utility or set DIGICERT_UTILITY_EXE / -DigiCertUtilityExe.'
+        AutoFix = $null
     }
 }
-
-
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
 
 function Invoke-Prechecks {
 <#
 .SYNOPSIS
-    Runs all pre-setup checks and returns a consolidated result.
+    Runs network and required DigiCert prechecks.
 
-.DESCRIPTION
-    Checks are evaluated in order. Non-critical failures apply their AutoFix
-    (e.g. disabling network-dependent paths) and continue. Critical failures
-    abort a real setup run before any mutation.
-
-.PARAMETER EnableCodeSigning
-    Retained for caller compatibility. DigiCert availability is always checked
-    because this setup requires DigiCert infrastructure.
-
-.PARAMETER DigiCertExe
-    Full path to DigiCertUtil.exe.
-
-.PARAMETER NonInteractive
-    When true (autonomous mode): non-critical failures apply AutoFix and
-    continue; critical failures throw immediately.
-    When false (semi-auto mode): critical failures still abort; the user gets
-    the same actionable diagnostics before setup stops.
-
-.PARAMETER Ctx
-    Reference to the setup context hashtable.  AutoFix scriptblocks receive
-    this to mark degraded non-critical capabilities.
-
-.OUTPUTS
-    PSCustomObject { AllPassed; ContinueSetup; Results }
+.EXAMPLE
+    Invoke-Prechecks -DigiCertExe $env:DIGICERT_UTILITY_EXE -NonInteractive
 #>
+    [CmdletBinding()]
     param(
-        [bool]     $EnableCodeSigning  = $true,
-        [string]   $DigiCertExe        = 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe',
-        [bool]     $NonInteractive     = $false,
-        [hashtable]$Ctx                = @{},
-        # Optional strict mode for diagnostics such as network reachability.
-        # Critical checks, including DigiCert, always stop.
-        [bool]     $StopOnNonCritical  = $false,
-        # Dry-run/report mode prints failures without prompting or throwing.
-        [bool]     $ReportOnly         = $false
+        [bool] $EnableCodeSigning = $true,
+        [string] $DigiCertExe = '',
+        [bool] $NonInteractive = $false,
+        [hashtable] $Ctx = @{},
+        [bool] $StopOnNonCritical = $false,
+        [bool] $ReportOnly = $false
     )
 
+    if (-not $DigiCertExe) {
+        $constants = Get-SetupConstants
+        $DigiCertExe = if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { [string]$constants.CodeSigning.DefaultDigiCertUtilityExe }
+    }
+
     $results = [System.Collections.Generic.List[object]]::new()
-
-    # --- Register checks ---
-    # Network: always run so the user gets an early, clear failure if offline.
     $results.Add((Test-NetworkAccess))
-
-    # DigiCert is required infrastructure for this automation, independent of
-    # whether the later signing step is enabled for a specific run.
     $results.Add((Test-DigiCertAvailable -DigiCertExe $DigiCertExe))
 
-    # --- Evaluate results ---
-    $failed        = @($results | Where-Object { -not $_.Passed })
-    $allPassed     = ($failed.Count -eq 0)
+    $failed = @($results | Where-Object { -not $_.Passed })
+    $allPassed = ($failed.Count -eq 0)
     $continueSetup = $allPassed
 
     if (-not $allPassed) {
@@ -200,57 +120,36 @@ function Invoke-Prechecks {
         Write-Host ('+{0}+' -f ('-' * 78)) -ForegroundColor Yellow
 
         foreach ($r in $failed) {
-            $critical = if ($r.PSObject.Properties.Name -contains 'Critical') { $r.Critical } else { $true }
-            $label    = if ($critical) { '[CRITICAL]' } else { '[WARN]    ' }
-            $color    = if ($critical) { 'Red' } else { 'Yellow' }
-            Write-Host ("  $label  {0}" -f $r.Check)   -ForegroundColor $color
+            $criticalFlag = if ($r.PSObject.Properties.Name -contains 'Critical') { $r.Critical } else { $true }
+            $label = if ($criticalFlag) { '[CRITICAL]' } else { '[WARN]    ' }
+            $color = if ($criticalFlag) { 'Red' } else { 'Yellow' }
+            Write-Host ("  $label  {0}" -f $r.Check) -ForegroundColor $color
             Write-Host ("            {0}" -f $r.Message) -ForegroundColor DarkGray
-            if ($r.Fix) {
-                Write-Host ("  [FIX]      {0}" -f $r.Fix) -ForegroundColor Cyan
-            }
+            if ($r.Fix) { Write-Host ("  [FIX]      {0}" -f $r.Fix) -ForegroundColor Cyan }
         }
-        Write-Host ''
 
         $nonCritical = @($failed | Where-Object { $_.PSObject.Properties.Name -contains 'Critical' -and -not $_.Critical })
-        $critical    = @($failed | Where-Object { -not ($_.PSObject.Properties.Name -contains 'Critical') -or $_.Critical })
+        $critical = @($failed | Where-Object { -not ($_.PSObject.Properties.Name -contains 'Critical') -or $_.Critical })
 
-        # Apply AutoFix for all non-critical failures immediately
         foreach ($r in $nonCritical) {
-            if ($r.AutoFix) {
-                & $r.AutoFix $Ctx
-                Write-Host ("  [AUTO-FIX] Applied context adjustment for '{0}'." -f $r.Check) -ForegroundColor DarkYellow
-            }
+            if ($r.AutoFix) { & $r.AutoFix $Ctx }
         }
 
         if ($critical.Count -gt 0) {
-            # Critical failures always stop a real setup run. In report-only
-            # mode, we return the failure so dry-run can show the remaining plan.
             $continueSetup = $false
-            if ($ReportOnly) {
-                Write-Host '  Report only: real setup would abort here.' -ForegroundColor Yellow
-            } elseif ($NonInteractive) {
-                Write-Host ("  Setup will abort: {0} critical precheck(s) failed." -f $critical.Count) -ForegroundColor Red
-            } else {
-                Write-Host '  Setup will abort. Resolve the critical precheck failure and re-run setup.' -ForegroundColor Red
-            }
+            if ($ReportOnly) { Write-Host '  Report only: real setup would abort here.' -ForegroundColor Yellow }
+            elseif ($NonInteractive) { Write-Host ("  Setup will abort: {0} critical precheck(s) failed." -f $critical.Count) -ForegroundColor Red }
+            else { Write-Host '  Setup will abort. Resolve the critical precheck failure and re-run setup.' -ForegroundColor Red }
+        } elseif ($StopOnNonCritical) {
+            $continueSetup = $false
+            Write-Host '  Setup will stop because strict non-critical precheck handling is enabled.' -ForegroundColor Yellow
         } else {
-            # Only non-critical failures - auto-fixed above
-            if ($StopOnNonCritical) {
-                $continueSetup = $false
-                Write-Host '  All failures were non-critical and have been auto-fixed.' -ForegroundColor DarkYellow
-                Write-Host '  Setup will stop. Re-run with -ContinueOnPrecheckFailure to skip this guard.' -ForegroundColor Yellow
-            } else {
-                $continueSetup = $true
-                Write-Host '  All failures were non-critical and have been auto-fixed. Continuing setup.' -ForegroundColor DarkYellow
-            }
+            $continueSetup = $true
+            Write-Host '  Non-critical failures were applied to context. Continuing setup.' -ForegroundColor DarkYellow
         }
     }
 
-    [pscustomobject]@{
-        AllPassed     = $allPassed
-        ContinueSetup = $continueSetup
-        Results       = $results
-    }
+    [pscustomobject]@{ AllPassed=$allPassed; ContinueSetup=$continueSetup; Results=$results }
 }
 
 Export-ModuleMember -Function Test-NetworkAccess, Test-DigiCertAvailable, Invoke-Prechecks

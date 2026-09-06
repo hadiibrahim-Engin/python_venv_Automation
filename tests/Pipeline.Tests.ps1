@@ -14,7 +14,6 @@ Describe 'Version single-source-of-truth' {
     }
 
     It 'Build.ps1 fails fast when VERSION and the manifest disagree' {
-        # Stage a throwaway copy of the repo metadata and corrupt VERSION.
         $work = Join-Path ([System.IO.Path]::GetTempPath()) ("ver-mismatch-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path (Join-Path $work 'PythonVenvAutomation') -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $work 'scripts4PythonAutomation') -Force | Out-Null
@@ -38,7 +37,7 @@ Describe 'Build output' {
         $LASTEXITCODE | Should -Be 0
         $artifacts = Join-Path $RepoRoot 'artifacts'
         Test-Path $artifacts | Should -BeTrue
-        (Get-ChildItem -Path $artifacts -Filter '*.zip' -Recurse).Count | Should -BeGreaterThan 0
+        @(Get-ChildItem -Path $artifacts -Filter '*.zip' -Recurse).Count | Should -BeGreaterThan 0
     }
 }
 

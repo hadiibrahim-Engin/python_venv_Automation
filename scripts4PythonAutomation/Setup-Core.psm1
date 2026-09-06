@@ -1,890 +1,359 @@
 #Requires -Version 5.1
-
 <#
 .SYNOPSIS
-    Root orchestration module for project setup.
+    Root orchestration module for PythonVenvAutomation.
 
 .DESCRIPTION
-    Loads all SetupCore helper modules and exposes Start-Setup, which performs
-    Python discovery/installation, package-manager runtime preparation,
-    virtual environment provisioning, project path wiring, and DigiCert-backed
-    signing/validation.
+    Loads SetupCore modules and exposes Start-Setup. The former monolithic
+    orchestration body is decomposed into named functions in SetupSteps.psm1 and
+    executed through SetupPipeline.psm1. Timing, dry-run handling, structured
+    errors and structured logging are centralized.
 #>
-
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Resolve to your actual modules folder
 $modulesDir = Join-Path (Join-Path $PSScriptRoot 'SetupCore') 'modules'
-if (-not (Test-Path (Join-Path $modulesDir 'Compat.psm1'))) {
-    Write-Host "Modules directory missing Compat.psm1: $modulesDir" -ForegroundColor Red
-    throw "Cannot continue without modules directory."
+if (-not (Test-Path -LiteralPath (Join-Path $modulesDir 'Compat.psm1') -PathType Leaf)) {
+    throw "Cannot continue without SetupCore modules directory: $modulesDir"
 }
 
-# Always call the real Import-Module cmdlet, import by full path.
-# Order matters: leaves first (UI, Versioning, NativeCommand), then modules
-# that depend on them. Per-child `Import-Module` calls in each module stay
-# in place so tests can import modules individually.
 $import = 'Microsoft.PowerShell.Core\Import-Module'
 $moduleLoadOrder = @(
-    'Compat',           # platform shims - must be first
-    'UI',               # logging helpers - no dependencies
-    'Path',             # persistent PATH updates for installed CLI tools
-    'Versioning',       # version constraint parsing
-    'Toml',             # pyproject.toml parsing
-    'NativeCommand',    # process execution primitives
-    'Config',           # .setup-config.json read/write
-    'Detection',        # PM detection (CLI → config → TOML → default)
-    'Filesystem',       # directory/process cleanup helpers
-    'PythonDiscovery',  # Python interpreter discovery and installation
-    'Venv',             # venv lifecycle
-    'VSCode',           # .vscode/settings.json writer
-    'Tcl',              # tcl runtime copy helper
-    'Poetry',           # Poetry CLI wrapper
-    'UV',               # uv CLI wrapper
-    'PackageManager',   # execution facade (install/sync/venv) - after Poetry + UV
-    'Prechecks',        # pre-flight checks
-    'CodeSigning'       # DigiCert signing
+    'Compat',
+    'Constants',
+    'Errors',
+    'Logging',
+    'UI',
+    'Path',
+    'Versioning',
+    'Toml',
+    'NativeCommand',
+    'Config',
+    'Detection',
+    'Filesystem',
+    'PythonDiscovery',
+    'Venv',
+    'VSCode',
+    'Tcl',
+    'Poetry',
+    'UV',
+    'PackageManager',
+    'Prechecks',
+    'CodeSigning',
+    'GitSync',
+    'SetupPipeline',
+    'SetupSteps'
 )
-foreach ($m in $moduleLoadOrder) {
-    & $import -FullyQualifiedName (Join-Path $modulesDir "$m.psm1") -Force -DisableNameChecking -ErrorAction Stop
+foreach ($moduleName in $moduleLoadOrder) {
+    & $import -FullyQualifiedName (Join-Path $modulesDir "$moduleName.psm1") -Force -DisableNameChecking -Global -ErrorAction Stop
 }
 
-
-# ---------------------------------------------------------------------------
-# Internal helper - executes a labeled pipeline step, handles timing + errors.
-# Uses $script:setupCurrentStep / $script:setupCurrentModule (set by Start-Setup)
-# and $script:setupDryRun to support dry-run mode.
-# ---------------------------------------------------------------------------
-function Invoke-SetupStep {
-    param(
-        [Parameter(Mandatory=$true)][string]      $Step,
-        [Parameter(Mandatory=$true)][string]      $Module,
-        [Parameter(Mandatory=$true)][string]      $Message,
-        [Parameter(Mandatory=$true)][scriptblock] $Action,
-        [bool] $Mandatory = $true,
-        # Read-only steps (e.g. detection/reporting) run even in dry-run mode
-        # because they do not mutate the file system.
-        [bool] $ReadOnly  = $false
-    )
-
-    $script:setupCurrentStep   = $Step
-    $script:setupCurrentModule = $Module
-
-    Write-LogStepStart -Step $Step -Module $Module -Message $Message
-
-    if ($script:setupDryRun -and -not $ReadOnly) {
-        Write-Host ("|   [DRY-RUN] Step {0} skipped - no changes made." -f $Step) -ForegroundColor DarkYellow
-        Write-Host ('+' + ('-' * 94) + '+') -ForegroundColor DarkCyan
-        return
-    }
-
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        & $Action
-        $sw.Stop()
-        Write-LogStepResult -Step $Step -Module $Module -Status 'OK' -Message $Message -DurationSec $sw.Elapsed.TotalSeconds
-    } catch {
-        $sw.Stop()
-        $d = Get-SetupErrorDetails -ErrorRecord $_
-        $status = if ($Mandatory) { 'ERROR' } else { 'WARN' }
-        Write-LogStepResult -Step $Step -Module $Module -Status $status -Message $d.Message -DurationSec $sw.Elapsed.TotalSeconds
-        Write-LogDetail -Key 'location'  -Value $d.Location
-        Write-LogDetail -Key 'error_id'  -Value $d.ErrorId
-        Write-LogDetail -Key 'command'   -Value $d.Command
-        if (($env:SETUP_SHOW_STACK -match '^(1|true|yes|on)$') -and $d.Stack) {
-            Write-Host '    - stack:' -ForegroundColor DarkGray
-            $d.Stack -split "`n" | ForEach-Object { Write-Host ("      {0}" -f $_.Trim()) -ForegroundColor DarkGray }
-        }
-        if ($Mandatory) { throw }
-    }
-}
-
-function Invoke-ExistingVenvUpdate {
-<#
-.SYNOPSIS
-    Refreshes an existing project .venv without running the full setup pipeline.
-
-.DESCRIPTION
-    Uses the dependency system already declared by the project. It does not
-    install Python, install package-manager CLIs, recreate .venv, write editor
-    settings, copy runtime DLLs, or run code signing. If the required CLI is
-    missing, it fails with a clear message so the operator can run setup once.
-#>
+function Invoke-SetupModeSelection {
+    [CmdletBinding()]
     param([Parameter(Mandatory=$true)][hashtable] $Ctx)
 
-    Confirm-VenvExists -VenvDir $Ctx.VenvDir
-    $venvPython = Get-VenvPythonExe -VenvDir $Ctx.VenvDir
-    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        throw ("Existing .venv Python was not found: {0}" -f $venvPython)
+    if ($Ctx.NonInteractive -or $Ctx.Mode -ne 'setup' -or $Ctx.PythonExePath -or $Ctx.ListMode) { return }
+
+    Write-Host ''
+    Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+    Write-Host '|  What should Setup do?                                    |' -ForegroundColor Cyan
+    Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+    Write-Host '|  [Enter]   Full setup, semi-auto Python selection          |' -ForegroundColor DarkGray
+    Write-Host '|  [u]       Update existing .venv only                      |' -ForegroundColor DarkGray
+    Write-Host '|  [l]       Full setup, list all Pythons and choose one     |' -ForegroundColor DarkGray
+    Write-Host '|  <path>    Full setup, explicit path to python.exe         |' -ForegroundColor DarkGray
+    Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+
+    $inputText = Read-Host 'Choice (Enter = full setup)'
+    $inputText = if ($inputText) { $inputText.Trim() } else { '' }
+    if ($inputText.Length -gt 1024) {
+        throw (New-SetupException -Message 'Interactive setup input is unexpectedly long.' -ErrorCode 'INPUT_TOO_LONG' -Step 'MODE' -Context @{})
     }
 
-    $requirementsFile = Join-Path $Ctx.ProjectRoot 'requirements.txt'
-    $pyprojectFile = Join-Path $Ctx.ProjectRoot 'pyproject.toml'
-
-    if ($Ctx.PmSource -eq 'default' -and (Test-Path -LiteralPath $requirementsFile -PathType Leaf)) {
-        $Ctx.PackageManager = 'pip-requirements'
-        Write-LogDetail -Key 'source' -Value 'requirements.txt'
+    $normalized = $inputText.ToLowerInvariant()
+    if ($normalized -in @('u','update','update-venv','venv-update','refresh-venv')) {
+        $Ctx.Mode = 'update-venv'
+    } elseif ($normalized -in @('l','list')) {
+        $Ctx.ListMode = $true
+    } elseif (-not [string]::IsNullOrWhiteSpace($inputText)) {
+        $candidate = $inputText.Trim('"').Trim("'")
+        try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch { }
+        $Ctx.PythonExePath = $candidate
     }
-
-    Write-LogDetail -Key 'venv_dir' -Value $Ctx.VenvDir
-    Write-LogDetail -Key 'venv_python' -Value $venvPython
-    Write-LogDetail -Key 'dependency_system' -Value $Ctx.PackageManager
-    Write-LogDetail -Key 'include_dev' -Value $Ctx.IncludeDev
-
-    switch ($Ctx.PackageManager) {
-        'uv' {
-            $uvExe = Get-UvExe
-            if (-not $uvExe) {
-                throw 'update-venv mode found a uv project, but uv is not installed or discoverable. Run full setup once, or install uv and rerun this mode.'
-            }
-            Add-ToolDirsToPath -Directories @((Split-Path $uvExe -Parent)) -Reason 'uv CLI' | Out-Null
-            $Ctx.UvInfo = [pscustomobject]@{ Source = 'existing'; Version = Get-UvVersion; Exe = $uvExe }
-
-            if ($Ctx.UpgradePackages -and $Ctx.UpgradePackages.Count -gt 0) {
-                Write-Host ("  Updating selected package(s) in existing .venv with uv: {0}" -f ($Ctx.UpgradePackages -join ', ')) -ForegroundColor Yellow
-                Invoke-PmUpdateSelectedDeps -Ctx $Ctx -Packages $Ctx.UpgradePackages -IncludeDev $Ctx.IncludeDev
-            } elseif ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
-                Write-Host '  Updating all dependencies in existing .venv with uv sync --upgrade.' -ForegroundColor Yellow
-                Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
-            } else {
-                Write-Host '  Refreshing existing .venv with uv sync.' -ForegroundColor Yellow
-                Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
-            }
-        }
-
-        'poetry' {
-            $poetryRunner = Get-PoetryShimPath
-            if ($poetryRunner) {
-                Add-ToolDirsToPath -Directories @((Split-Path $poetryRunner -Parent)) -Reason 'Poetry CLI' | Out-Null
-            } elseif (Test-PoetryAvailable -PythonExe $venvPython) {
-                $poetryRunner = $venvPython
-            } else {
-                throw 'update-venv mode found a Poetry project, but Poetry is not installed or discoverable. Run full setup once, or install Poetry and rerun this mode.'
-            }
-            $Ctx.PoetryPythonPath = $poetryRunner
-            $Ctx.PmPythonPath = $poetryRunner
-
-            if ($Ctx.UpgradePackages -and $Ctx.UpgradePackages.Count -gt 0) {
-                Write-Host ("  Updating selected package(s) in existing .venv with Poetry: {0}" -f ($Ctx.UpgradePackages -join ', ')) -ForegroundColor Yellow
-                Invoke-PmUpdateSelectedDeps -Ctx $Ctx -Packages $Ctx.UpgradePackages -IncludeDev $Ctx.IncludeDev
-            } elseif ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
-                Write-Host '  Updating all dependencies in existing .venv with poetry update.' -ForegroundColor Yellow
-                Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
-            } else {
-                Write-Host '  Refreshing existing .venv with poetry install.' -ForegroundColor Yellow
-                Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev
-            }
-        }
-
-        'pip-requirements' {
-            $pipArgs = @('-m', 'pip', 'install')
-            if ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) {
-                $pipArgs += '--upgrade'
-                Write-Host '  Updating existing .venv from requirements.txt with pip --upgrade.' -ForegroundColor Yellow
-            } else {
-                Write-Host '  Refreshing existing .venv from requirements.txt with pip.' -ForegroundColor Yellow
-            }
-            $pipArgs += @('-r', $requirementsFile)
-            Invoke-NativeCommand `
-                -Executable       $venvPython `
-                -Arguments        $pipArgs `
-                -WorkingDirectory $Ctx.ProjectRoot `
-                -PassThrough `
-                -ThrowOnError `
-                -FailureMessage   "'pip install -r requirements.txt' failed -- see output above." | Out-Null
-        }
-
-        default {
-            if (Test-Path -LiteralPath $requirementsFile -PathType Leaf) {
-                $Ctx.PackageManager = 'pip-requirements'
-                Write-Host '  Refreshing existing .venv from requirements.txt with pip.' -ForegroundColor Yellow
-                Invoke-NativeCommand `
-                    -Executable       $venvPython `
-                    -Arguments        @('-m', 'pip', 'install', '-r', $requirementsFile) `
-                    -WorkingDirectory $Ctx.ProjectRoot `
-                    -PassThrough `
-                    -ThrowOnError `
-                    -FailureMessage   "'pip install -r requirements.txt' failed -- see output above." | Out-Null
-            } elseif (Test-Path -LiteralPath $pyprojectFile -PathType Leaf) {
-                $pipArgs = @('-m', 'pip', 'install')
-                if ($Ctx.UpdateDependencies -and -not $Ctx.PinExact) { $pipArgs += '--upgrade' }
-                $pipArgs += @('-e', $Ctx.ProjectRoot)
-                Write-Host '  Refreshing existing .venv from pyproject.toml with pip editable install.' -ForegroundColor Yellow
-                Invoke-NativeCommand `
-                    -Executable       $venvPython `
-                    -Arguments        $pipArgs `
-                    -WorkingDirectory $Ctx.ProjectRoot `
-                    -PassThrough `
-                    -ThrowOnError `
-                    -FailureMessage   "'pip install -e .' failed -- see output above." | Out-Null
-            } else {
-                throw 'Could not detect a supported dependency system for update-venv mode. Expected uv.lock/[tool.uv], poetry.lock/[tool.poetry], requirements.txt, or pyproject.toml.'
-            }
-        }
-    }
-
-    $venvScriptsDir = Join-Path $Ctx.VenvDir 'Scripts'
-    Add-ToolDirsToPath -Directories @($venvScriptsDir) -Reason 'project .venv CLI' | Out-Null
-    Write-Host '  Existing virtual environment refresh completed.' -ForegroundColor Green
 }
 
+function New-SetupLoggingCallbacks {
+    [CmdletBinding()]
+    param()
+
+    [pscustomobject]@{
+        OnStart = {
+            param($step)
+            $script:setupCurrentStep = $step.Name
+            $script:setupCurrentModule = $step.Module
+            Write-LogStepStart -Step $step.Name -Module $step.Module -Message $step.Message
+            Write-StructuredLog -Level INFO -Step $step.Name -Module $step.Module -Message $step.Message -NoConsole
+        }
+        OnResult = {
+            param($step, $status, $message, $duration)
+            $uiStatus = switch ($status) { 'SKIPPED' { 'WARN' } default { $status } }
+            Write-LogStepResult -Step $step.Name -Module $step.Module -Status $uiStatus -Message $message -DurationSec $duration
+            $level = switch ($status) { 'ERROR' { 'ERROR' }; 'WARN' { 'WARN' }; default { 'INFO' } }
+            Write-StructuredLog -Level $level -Step $step.Name -Module $step.Module -Message $message -Context @{ DurationSec = $duration; Status = $status } -NoConsole
+        }
+        OnDetail = {
+            param($key, $value)
+            Write-LogDetail -Key $key -Value $value
+        }
+    }
+}
+
+function New-FullSetupPipeline {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][hashtable] $Ctx,
+        [Parameter(Mandatory=$true)][string] $DigiCertUtilityExe,
+        [bool] $KernelDriverSigning = $false,
+        [bool] $RequirePmShimSigning = $true,
+        [bool] $StopOnPrecheckFailure = $false,
+        [bool] $SignPoetryOnly = $false,
+        [bool] $DryRun = $false
+    )
+
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $steps.Add((New-SetupPipelineStep -Name 'PRECHECK' -Module 'Prechecks' -Message 'Run pre-setup checks' -ReadOnly -ErrorCode 'PRECHECK_FAILED' -Action {
+        Invoke-PrecheckStep -Ctx $Ctx -DigiCertUtilityExe $DigiCertUtilityExe -StopOnPrecheckFailure:$StopOnPrecheckFailure -DryRun:$DryRun | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'METADATA' -Module 'Toml' -Message 'Parse project metadata' -ReadOnly -ErrorCode 'PROJECT_METADATA_FAILED' -Action {
+        Invoke-ProjectMetadataStep -Ctx $Ctx | Out-Null
+    }))
+    # Python resolution is intentionally mutating-capable because it may install
+    # Python when AllowPythonInstall is true. Therefore it is NOT ReadOnly and
+    # is skipped by DryRun/WhatIf.
+    $steps.Add((New-SetupPipelineStep -Name 'PYTHON' -Module 'PythonDiscovery' -Message 'Resolve compatible Python interpreter' -ErrorCode 'PYTHON_RESOLUTION_FAILED' -Action {
+        Invoke-PythonDetectionStep -Ctx $Ctx -Confirm:$false | Out-Null
+        if ($Ctx.EnableCodeSigning -and -not $DryRun) {
+            Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
+        }
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'PM-RUNTIME' -Module 'PackageManager' -Message 'Ensure package-manager runtime' -ErrorCode 'PM_RUNTIME_FAILED' -Action {
+        Invoke-PackageManagerRuntimeStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'PM-SIGN' -Module 'CodeSigning' -Message 'Validate/sign package-manager executable' -Mandatory:$RequirePmShimSigning -ErrorCode 'PM_SIGNING_FAILED' -Action {
+        Invoke-PackageManagerSigningStep -Ctx $Ctx -RequirePmShimSigning:$RequirePmShimSigning -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'PM-CONFIG' -Module 'PackageManager' -Message 'Configure package-manager defaults' -ErrorCode 'PM_CONFIG_FAILED' -Action {
+        Invoke-PackageManagerConfigureStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'PM-CLEAN' -Module 'PackageManager' -Message 'Clean stale environment associations' -Mandatory:$false -ErrorCode 'PM_CLEANUP_FAILED' -Action {
+        Invoke-PackageManagerCleanupStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    if ($Ctx.ForceRecreateVenv) {
+        $steps.Add((New-SetupPipelineStep -Name 'VENV-BACKUP' -Module 'Venv' -Message 'Backup and remove existing .venv' -ErrorCode 'VENV_BACKUP_FAILED' -Action {
+            Invoke-VenvBackupStep -Ctx $Ctx -Confirm:$false | Out-Null
+        }))
+    }
+    $steps.Add((New-SetupPipelineStep -Name 'VENV-PREPARE' -Module 'Venv' -Message 'Prepare project virtual environment' -ErrorCode 'VENV_PREPARE_FAILED' -Action {
+        Invoke-VenvPrepareStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'VENV-VALIDATE' -Module 'Venv' -Message 'Validate virtual environment' -ReadOnly -ErrorCode 'VENV_INVALID' -Action {
+        Invoke-VenvValidationStep -Ctx $Ctx
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'VENV-RUNTIME' -Module 'Venv' -Message 'Copy Python runtime DLL' -ErrorCode 'VENV_RUNTIME_COPY_FAILED' -Action {
+        Invoke-VenvRuntimeCopyStep -Ctx $Ctx -Confirm:$false
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'LOCK' -Module 'PackageManager' -Message 'Synchronize dependency lock state' -ErrorCode 'LOCK_SYNC_FAILED' -Action {
+        Invoke-LockSyncStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'DEPENDENCIES' -Module 'PackageManager' -Message 'Install/update project dependencies' -ErrorCode 'DEPENDENCY_INSTALL_FAILED' -Action {
+        Invoke-DependencyInstallStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'VENV-PATH' -Module 'Path' -Message 'Persist project .venv CLI tools on PATH' -Mandatory:$false -ErrorCode 'PATH_UPDATE_FAILED' -Action {
+        Invoke-VenvPathStep -Ctx $Ctx -Confirm:$false
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'PROJECT-PTH' -Module 'Venv' -Message 'Write project .pth into site-packages' -ErrorCode 'PTH_WRITE_FAILED' -Action {
+        Invoke-ProjectPthStep -Ctx $Ctx -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'VSCODE' -Module 'VSCode' -Message 'Pin venv interpreter in VS Code settings' -ErrorCode 'VSCODE_WRITE_FAILED' -Action {
+        Invoke-VSCodeStep -Ctx $Ctx -Confirm:$false
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'TCL' -Module 'Tcl' -Message 'Copy Tcl runtime into .venv' -Mandatory:$false -ErrorCode 'TCL_COPY_FAILED' -Action {
+        Invoke-TclStep -Ctx $Ctx -Confirm:$false
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'SMART-SIGNING' -Module 'CodeSigning' -Message 'Validate signatures and sign only new/changed binaries' -Mandatory:$false -ErrorCode 'VENV_SIGNING_FAILED' -Action {
+        Invoke-SmartSigningStep -Ctx $Ctx -SignPoetryOnly:$SignPoetryOnly -Confirm:$false | Out-Null
+    }))
+    $steps.Add((New-SetupPipelineStep -Name 'CLEANUP' -Module 'Filesystem' -Message 'Clean stale quarantine and backup directories' -Mandatory:$false -ErrorCode 'CLEANUP_FAILED' -Action {
+        Invoke-StaleCleanupStep -Ctx $Ctx -Confirm:$false | Out-Null
+        Invoke-VenvBackupCleanupStep -Ctx $Ctx -Confirm:$false
+    }))
+    @($steps)
+}
 
 function Start-Setup {
 <#
 .SYNOPSIS
-    Entry point for the modularized Setup Core flow.
+    Executes the Python environment setup pipeline.
 
 .DESCRIPTION
-    Executes the setup pipeline in a fixed order:
-    parse pyproject metadata, resolve a compatible Python, ensure the selected
-    package-manager runtime,
-    recreate and validate .venv, install dependencies, write editor settings,
-    and sign binaries through DigiCert.
+    The setup process is an ordered pipeline of named, independently testable
+    steps. `-WhatIf` is treated like `-DryRun` for mutating pipeline steps,
+    while read-only discovery/precheck steps continue to run.
 
-.PARAMETER ProjectRoot
-    Project root directory containing pyproject.toml.
+.EXAMPLE
+    Start-Setup -ProjectRoot C:\src\project
 
-.PARAMETER ForceRecreateVenv
-    Removes and recreates .venv when true.
+.EXAMPLE
+    Start-Setup -ProjectRoot C:\src\project -Mode update-venv
 
-.PARAMETER SkipPoetryInstall
-    Skips `poetry install` when true.
-
-.PARAMETER PythonExePath
-    Optional explicit path to python.exe. When provided, setup validates this
-    interpreter against pyproject constraints and uses it directly.
-
-.PARAMETER NonInteractive
-    Disables pause prompts and uses exception flow for failures.
-
-.PARAMETER EnableCodeSigning
-    Enables the DigiCert signing steps for generated executables. DigiCert
-    availability is still a required precheck for this automation.
-
-.PARAMETER DigiCertUtilityExe
-    Full path to DigiCertUtil.exe.
-
-.PARAMETER KernelDriverSigning
-    Uses kernel driver signing mode for DigiCert when enabled.
-
-.PARAMETER SignPoetryOnly
-    Signs only poetry.exe under the venv Scripts directory when enabled.
-
-.PARAMETER UpdateDependencies
-    Kept for backward compatibility.  The default behaviour is now to upgrade
-    all dependencies, so passing this flag is a no-op unless PinExact is also
-    set.
-
-.PARAMETER PinExact
-    When true, installs the exact versions recorded in the lock file without
-    attempting to upgrade anything.  Use this for reproducible / CI builds
-    where you need the identical package set every run.
-
-.PARAMETER ListMode
-    When true, shows every Python interpreter found on this machine in a
-    numbered table and lets the user pick one before setup continues.
-    Compatible versions are marked [OK]; incompatible ones are marked [--].
-    The constraint from pyproject.toml is still enforced - incompatible picks
-    are rejected and the user is prompted again.
-
-.PARAMETER PackageManager
-    Which package manager to use for dependency installation.
-    'auto'   (default) - inferred from the project: checks pyproject.toml sections
-                         first, then lock files as a tiebreaker for dual-mode projects.
-                         Falls back to 'poetry' when no signal is found.
-    'poetry'           - uses [tool.poetry] section and poetry.lock.
-    'uv'               - uses [project] (PEP 621) section and uv.lock.
-    Pass -PackageManager uv or -PackageManager poetry to override detection.
-
-.PARAMETER IncludeDev
-    When true (default), installs development dependencies.
-    When false, installs production dependencies only.
-    UV: omits --all-extras; Poetry: adds --without dev.
-
-.PARAMETER DryRun
-    When set, prints each setup step but executes no actions.
-    Useful to preview the pipeline without modifying the file system.
-
-.PARAMETER PinnedPoetryVersion
-    When set, installs exactly this Poetry version (e.g. '1.8.3') instead of
-    the latest release.  Has no effect when PackageManager is 'uv'.
-
-.PARAMETER PinnedUvVersion
-    When set, installs exactly this uv version (e.g. '0.6.14') instead of the
-    latest release.  Has no effect when PackageManager is 'poetry'.
-
-.PARAMETER AllowPythonInstall
-    When true, setup may download and install Python from python.org if no
-    compatible interpreter is found locally. Defaults to true.
-
-.OUTPUTS
-    PSCustomObject summarizing selected Python, Poetry runtime, and output paths.
+.EXAMPLE
+    Start-Setup -ProjectRoot C:\src\project -WhatIf
 #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [Parameter()]
-        [string] $ProjectRoot = (Get-Location).Path,
-
-        [Parameter()]
-        [bool] $ForceRecreateVenv = $false,
-
-        [Parameter()]
-        [bool] $SkipPoetryInstall = $false,
-
-        [Parameter()]
-        [string] $PythonExePath,
-
-        [Parameter()]
-        [bool] $NonInteractive = $false,
-
-        [Parameter()]
-        [bool] $EnableCodeSigning = $true,
-
-        [Parameter()]
-        [string] $DigiCertUtilityExe = $(if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { 'C:\Program Files\DigiCertUtility\DigiCertUtil.exe' }),
-
-        [Parameter()]
-        [bool] $KernelDriverSigning = $false,
-
-        [Parameter()]
-        [bool] $SignPoetryOnly = $false,
-
-        [Parameter()]
-        [bool] $RequirePmShimSigning = $true,
-
-        [Parameter()]
-        # Kept for backward compatibility; upgrading is now the default.
-        # Set PinExact=$true to opt out of upgrading.
-        [bool] $UpdateDependencies = $false,
-
-        [Parameter()]
-        # When true, installs exact versions from the lock file without upgrading.
-        # Use for reproducible / CI builds.  Takes priority over UpgradePackages.
-        [bool] $PinExact = $false,
-
-        [Parameter()]
-        [bool] $ListMode = $false,
-
-        [Parameter()]
-        [ValidateSet('uv','poetry','auto')]
-        [string] $PackageManager = 'auto',
-
-        [Parameter()]
-        [bool] $IncludeDev = $true,
-
-        [Parameter()]
-        [switch] $DryRun,
-
-        [Parameter()]
-        [string] $PinnedPoetryVersion = '',
-
-        [Parameter()]
-        [string] $PinnedUvVersion = '',
-
-        [Parameter()]
-        [bool] $AllowPythonInstall = $true,
-
-        [Parameter()]
-        [ValidateSet('setup','update-venv','venv-update','refresh-venv')]
-        [string] $Mode = 'setup',
-
-        [Parameter()]
-        # One or more package names to re-resolve to their latest allowed
-        # versions while leaving every other locked version untouched.
-        # Ideal for Git-branch-ref dependencies (e.g. an Azure DevOps library
-        # tracked on 'main') that should be refreshed on demand without a full
-        # update.  Ignored when UpdateDependencies=$true (full upgrade wins).
-        [string[]] $UpgradePackages = @(),
-
-        [Parameter()]
-        # Critical prechecks always stop setup. Set true to also stop on
-        # non-critical diagnostics such as network reachability warnings.
-        [bool] $StopOnPrecheckFailure = $false
+        [Parameter()][ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string] $ProjectRoot = (Get-Location).Path,
+        [Parameter()][bool] $ForceRecreateVenv = $false,
+        [Parameter()][bool] $SkipPoetryInstall = $false,
+        [Parameter()][string] $PythonExePath,
+        [Parameter()][bool] $NonInteractive = $false,
+        [Parameter()][bool] $EnableCodeSigning = $true,
+        [Parameter()][string] $DigiCertUtilityExe = '',
+        [Parameter()][bool] $KernelDriverSigning = $false,
+        [Parameter()][bool] $SignPoetryOnly = $false,
+        [Parameter()][bool] $RequirePmShimSigning = $true,
+        [Parameter()][bool] $UpdateDependencies = $false,
+        [Parameter()][bool] $PinExact = $false,
+        [Parameter()][bool] $ListMode = $false,
+        [Parameter()][ValidateSet('uv','poetry','auto')][string] $PackageManager = 'auto',
+        [Parameter()][bool] $IncludeDev = $true,
+        [Parameter()][switch] $DryRun,
+        [Parameter()][string] $PinnedPoetryVersion = '',
+        [Parameter()][string] $PinnedUvVersion = '',
+        [Parameter()][bool] $AllowPythonInstall = $true,
+        [Parameter()][ValidateSet('setup','update-venv','venv-update','refresh-venv')][string] $Mode = 'setup',
+        [Parameter()][string[]] $UpgradePackages = @(),
+        [Parameter()][bool] $StopOnPrecheckFailure = $false,
+        [Parameter()][ValidateSet('DEBUG','INFO','WARN','ERROR')][string] $LogLevel = 'INFO'
     )
 
+    $ctx = $null
+    $script:setupCurrentStep = 'INIT'
+    $script:setupCurrentModule = 'Core'
+    $effectiveDryRun = [bool]$DryRun -or [bool]$WhatIfPreference
+
     try {
-        Set-StrictMode -Version Latest
-        $ctx = $null
-
-        # Initialise script-scope state used by Invoke-SetupStep (defined at module scope).
-        # setupCurrentStep / setupCurrentModule track which step is executing so the
-        # outer catch can report the failing stage.
-        $script:setupCurrentStep   = 'INIT'
-        $script:setupCurrentModule = 'Core'
-        $script:setupDryRun        = [bool]$DryRun
-
         if (-not (Get-IsWindows)) {
-            throw 'This setup automation is Windows-only. Run it from Windows PowerShell or pwsh on Windows.'
+            throw (New-SetupException -Message 'This setup automation is Windows-only.' -ErrorCode 'PLATFORM_UNSUPPORTED' -Step 'INIT' -Context @{})
         }
 
-        # Detach any active virtual environment
-        $env:VIRTUAL_ENV   = $null
+        $constants = Get-SetupConstants
+        if (-not $DigiCertUtilityExe) {
+            $DigiCertUtilityExe = if ($env:DIGICERT_UTILITY_EXE) { $env:DIGICERT_UTILITY_EXE } else { [string]$constants.CodeSigning.DefaultDigiCertUtilityExe }
+        }
+        if (-not (Test-Path -LiteralPath $DigiCertUtilityExe -PathType Leaf)) {
+            throw (New-SetupException -Message 'DigiCert Utility not found. Please install or set environment variable.' -ErrorCode 'DIGICERT_NOT_FOUND' -Step 'INIT' -Context @{ DigiCertUtilityExe = $DigiCertUtilityExe })
+        }
+
+        $correlationId = Start-StructuredLogSession -LogLevel $LogLevel
+        Write-StructuredLog -Level INFO -Step 'INIT' -Module 'Core' -Message 'Python environment setup started.' -Context @{ ProjectRoot = $ProjectRoot; Mode = $Mode; DryRun = $effectiveDryRun } -NoConsole
+
+        $env:VIRTUAL_ENV = $null
         $env:POETRY_ACTIVE = $null
-        $env:CONDA_PREFIX  = $null
+        $env:CONDA_PREFIX = $null
 
-        # Context (hashtable avoids the strict-mode pscustomobject
-        # property-add-after-construction smell)
-        if (-not (Test-Path -LiteralPath $ProjectRoot -PathType Container)) {
-            throw "Project root does not exist: $ProjectRoot"
+        $ctx = New-SetupContext `
+            -ProjectRoot $ProjectRoot `
+            -ForceRecreateVenv:$ForceRecreateVenv `
+            -SkipPoetryInstall:$SkipPoetryInstall `
+            -PythonExePath $PythonExePath `
+            -NonInteractive:$NonInteractive `
+            -EnableCodeSigning:$EnableCodeSigning `
+            -UpdateDependencies:$UpdateDependencies `
+            -PinExact:$PinExact `
+            -ListMode:$ListMode `
+            -PackageManager $PackageManager `
+            -IncludeDev:$IncludeDev `
+            -PinnedPoetryVersion $PinnedPoetryVersion `
+            -PinnedUvVersion $PinnedUvVersion `
+            -AllowPythonInstall:$AllowPythonInstall `
+            -Mode $Mode `
+            -UpgradePackages $UpgradePackages
+
+        $callbacks = New-SetupLoggingCallbacks
+        $detectStep = New-SetupPipelineStep -Name 'DETECT' -Module 'Detection' -Message 'Detect package manager from project files' -ReadOnly -ErrorCode 'PM_DETECTION_FAILED' -Action {
+            Invoke-PackageManagerDetectionStep -Ctx $ctx
         }
-        $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+        Invoke-SetupPipelineStep -Step $detectStep -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
 
-        # Build the context.  PackageManager holds the raw CLI arg here (may be 'auto').
-        # The DETECT step below is responsible for resolving the final PM value.
-        $ctx = @{
-            ProjectRoot          = $resolvedRoot
-            ProjectName          = $null
-            RequiresPython       = $null
-            ParsedConstraints    = $null
-            SelectedPython       = $null
-            # PM runtime info — set by Invoke-PmEnsureRuntime (Step 3)
-            UvInfo               = $null
-            PoetryInfo           = $null
-            PoetryPythonPath     = $null   # poetry-specific shortcut
-            PmPythonPath         = $null   # generic alias; works for both uv and poetry
-            VenvDir              = Join-Path $resolvedRoot '.venv'
-            SitePackagesDir      = $null
-            SignResult           = $null
-            VscodeSettingsFile   = Join-Path (Join-Path $resolvedRoot '.vscode') 'settings.json'
-            NonInteractive       = $NonInteractive
-            ForceRecreateVenv    = $ForceRecreateVenv
-            SkipPoetryInstall    = $SkipPoetryInstall
-            PythonExePath        = $PythonExePath
-            UpdateDependencies   = $UpdateDependencies
-            ListMode             = $ListMode
-            PackageManager       = $PackageManager      # raw CLI arg ('auto'|'uv'|'poetry'); DETECT resolves
-            PmSource             = $null                # 'cli' | 'config-file' | 'detected' | 'default'
-            PmDetectionReport    = $null                # raw signals; populated when PmSource='detected'
-            EnableCodeSigning    = $EnableCodeSigning   # validated by Prechecks
-            NetworkAvailable     = $true                # mutable — Prechecks may set to $false
-            IncludeDev           = $IncludeDev
-            PinnedPoetryVersion  = $PinnedPoetryVersion
-            PinnedUvVersion      = $PinnedUvVersion
-            AllowPythonInstall   = $AllowPythonInstall
-            UpgradePackages      = $UpgradePackages     # string[]; selective per-package upgrade
-            PinExact             = $PinExact            # bool; install exact lock-file versions
-            VenvBackupPath       = $null                # set by New-VenvBackup (step 5b) or Resolve-VenvReuseOrRecreate (step 5c)
-            PrechecksWouldAbort  = $false
-            Mode                 = $Mode
-        }
+        Invoke-SetupModeSelection -Ctx $ctx
 
-        Write-LogStepStart -Step 'SETUP' -Module 'Core' -Message 'Initialize setup context'
-        Write-LogDetail -Key 'project'      -Value (Split-Path $ctx.ProjectRoot -Leaf)
-        Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
-        Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
-        Write-LogDetail -Key 'code_signing' -Value $ctx.EnableCodeSigning
-        Write-LogDetail -Key 'mode'         -Value $ctx.Mode
-        if ($script:setupDryRun) {
-            Write-LogDetail -Key 'dry_run' -Value 'true  - NO CHANGES will be made to the file system'
-        }
-        Write-LogStepResult -Step 'SETUP' -Module 'Core' -Status 'OK' -Message 'Context initialized'
-
-        # DETECT step
-        # All detection logic lives in Detection.psm1 (Invoke-PmDetection).
-        # Runs even in dry-run mode (ReadOnly) — only reads files, no mutations.
-        Invoke-SetupStep -Step 'DETECT' -Module 'Detection' -Message 'Detect package manager from project files' -Mandatory $true -ReadOnly $true -Action {
-            Invoke-PmDetection -Ctx $ctx
-        } | Out-Null
-
-        # Main interactive choice. Keep this before full-setup prechecks so a
-        # user can choose update-venv without needing DigiCert/Python setup checks.
-        # Only shown when no explicit mode/path/list choice was provided via CLI.
-        if (-not $ctx.NonInteractive -and
-            $ctx.Mode -eq 'setup' -and
-            -not $ctx.PythonExePath -and
-            -not $ctx.ListMode) {
-
-            Write-Host ''
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host '|  What should Setup do?                                    |' -ForegroundColor Cyan
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host '|  [Enter]   Full setup, semi-auto Python selection          |' -ForegroundColor DarkGray
-            Write-Host '|  [u]       Update existing .venv only                      |' -ForegroundColor DarkGray
-            Write-Host '|  [l]       Full setup, list all Pythons and choose one     |' -ForegroundColor DarkGray
-            Write-Host '|  <path>    Full setup, explicit path to python.exe         |' -ForegroundColor DarkGray
-            Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
-            Write-Host ''
-            $userSetupInput = Read-Host 'Choice (Enter = full setup)'
-            $userSetupInput = if ($userSetupInput) { $userSetupInput.Trim() } else { '' }
-
-            if ($userSetupInput -in @('u', 'update', 'update-venv', 'venv-update', 'refresh-venv')) {
-                $ctx.Mode = 'update-venv'
-                Write-Host 'Update mode selected. Setup will refresh the existing .venv only.' -ForegroundColor DarkGray
-            } elseif ($userSetupInput -ieq 'l' -or $userSetupInput -ieq 'list') {
-                $ctx.ListMode = $true
-                Write-Host 'List mode selected. All Python installations will be shown.' -ForegroundColor DarkGray
-            } elseif (-not [string]::IsNullOrWhiteSpace($userSetupInput)) {
-                $candidate = $userSetupInput.Trim('"').Trim("'")
-                try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch { }
-                $ctx.PythonExePath = $candidate
-                Write-Host ("Explicit path accepted: {0}" -f $ctx.PythonExePath) -ForegroundColor DarkGray
-            } else {
-                Write-Host 'Full setup selected. Setup will find the best compatible Python.' -ForegroundColor DarkGray
+        if ($ctx.Mode -in @('update-venv','venv-update','refresh-venv')) {
+            if ($ctx.EnableCodeSigning -and -not $effectiveDryRun) {
+                Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
             }
-        }
-
-        if ($ctx.Mode -in @('update-venv', 'venv-update', 'refresh-venv')) {
-            Invoke-SetupStep -Step 'UPDATE-VENV' -Module 'Venv' -Message 'Refresh existing virtual environment only' -Mandatory $true -Action {
-                Invoke-ExistingVenvUpdate -Ctx $ctx
-            } | Out-Null
-
-            $updateDoneMessage = if ($script:setupDryRun) {
-                'Dry run completed; existing virtual environment refresh was not executed'
-            } else {
-                'Existing virtual environment refreshed successfully'
+            $updateStep = New-SetupPipelineStep -Name 'UPDATE-VENV' -Module 'Venv' -Message 'Refresh existing .venv and validate signing state' -ErrorCode 'VENV_UPDATE_FAILED' -Action {
+                Invoke-ExistingVenvUpdateStep -Ctx $ctx -SignPoetryOnly:$SignPoetryOnly -Confirm:$false
             }
-            Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message $updateDoneMessage
-
-            [pscustomobject]@{
-                ProjectRoot    = $ctx.ProjectRoot
-                PackageManager = $ctx.PackageManager
-                VenvDir        = $ctx.VenvDir
-                Mode           = $ctx.Mode
-            }
-            return
-        }
-
-        # Step 0: Pre-setup checks
-        # Runs before anything is modified on disk.  Non-critical failures warn.
-        # Critical failures, including missing DigiCert,
-        # stop real setup before any mutation.
-        Invoke-SetupStep -Step '0/13' -Module 'Prechecks' -Message 'Run pre-setup checks' -Mandatory $true -ReadOnly $true -Action {
-            $prechecks = Invoke-Prechecks `
-                -EnableCodeSigning $ctx.EnableCodeSigning `
-                -DigiCertExe       $DigiCertUtilityExe `
-                -NonInteractive    ([bool]$ctx.NonInteractive) `
-                -Ctx               $ctx `
-                -StopOnNonCritical $StopOnPrecheckFailure `
-                -ReportOnly        ([bool]$script:setupDryRun)
-            if (-not $prechecks.ContinueSetup) {
-                if ($script:setupDryRun) {
-                    $ctx.PrechecksWouldAbort = $true
-                    Write-LogDetail -Key 'dry_run_prechecks' -Value 'real setup would abort before making changes'
-                } else {
-                    throw 'Setup aborted: critical prechecks failed.'
-                }
-            }
-            Write-LogDetail -Key 'prechecks_passed' -Value $prechecks.AllPassed
-            Write-LogDetail -Key 'code_signing_effective' -Value $ctx.EnableCodeSigning
-        } | Out-Null
-
-        # Step 1: Parse pyproject.toml
-        Invoke-SetupStep -Step '1/13' -Module 'PyProject' -Message 'Parse project metadata' -Mandatory $true -ReadOnly $true -Action {
-            $meta = Get-ProjectMetadata -ProjectRoot $ctx.ProjectRoot
-            $ctx.ProjectName    = $meta.ProjectName
-            $ctx.RequiresPython = $meta.RequiresPython
-            Write-LogDetail -Key 'project_name'     -Value $ctx.ProjectName
-            Write-LogDetail -Key 'python_constraint' -Value $ctx.RequiresPython
-            $ctx.ParsedConstraints = ConvertTo-VersionConstraints -ConstraintStr $ctx.RequiresPython
-        } | Out-Null
-
-        # Step 2: Resolve Python interpreter
-        Invoke-SetupStep -Step '2/13' -Module 'Python' -Message 'Resolve Python interpreter' -Mandatory $true -ReadOnly $true -Action {
-            $ctx.SelectedPython = Resolve-SelectedPython `
-                -Constraints           $ctx.ParsedConstraints `
-                -RequiresPythonRaw     $ctx.RequiresPython `
-                -VenvDir               $ctx.VenvDir `
-                -ExplicitPythonExePath $ctx.PythonExePath `
-                -AllowInstall:([bool]$ctx.AllowPythonInstall) `
-                -NonInteractive:([bool]$ctx.NonInteractive) `
-                -ListMode:([bool]$ctx.ListMode)
-            Write-LogDetail -Key 'python_version' -Value $ctx.SelectedPython.Version
-            Write-LogDetail -Key 'python_exe'     -Value $ctx.SelectedPython.Exe
-            Write-LogDetail -Key 'python_source'  -Value $ctx.SelectedPython.Source
-        } | Out-Null
-
-        # Configure code-signing defaults after Python is known. DigiCert is a
-        # required precheck for this automation, so missing tooling has
-        # already stopped a real run before this point.
-        if ($ctx.EnableCodeSigning -and -not $script:setupDryRun) {
-            Set-CodeSignerDefaults -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning $KernelDriverSigning
-        }
-
-        # Steps 3-9: Package-manager pipeline (PackageManager.psm1 facade)
-        # The orchestrator contains zero PM-specific knowledge from here on.
-        # To add a third package manager: create its .psm1, import it inside
-        # PackageManager.psm1, and add switch branches there.
-        # This block never needs to change.
-
-        # 3. Ensure PM runtime (installs if missing)
-        Invoke-SetupStep -Step '3/13' -Module 'PM' -Message ("Ensure {0} runtime" -f $ctx.PackageManager) -Mandatory $true -Action {
-            Invoke-PmEnsureRuntime -Ctx $ctx
-        } | Out-Null
-
-        # 3a. Sign PM executable/shim when code signing is active.
-        #     UV:     signs uv.exe itself (native binary, no separate shim).
-        #     Poetry: signs the poetry.exe shim installed by pipx/installer.
-        $pmShimPath = Get-PmShimPath -Ctx $ctx
-        if ($ctx.EnableCodeSigning -and $pmShimPath) {
-            Invoke-SetupStep -Step '3a/13' -Module 'CodeSigning' -Message ("Sign {0} CLI executable" -f $ctx.PackageManager) -Mandatory ([bool]$RequirePmShimSigning) -Action {
-                Write-LogDetail -Key 'exe_path' -Value $pmShimPath
-                $shimSign = Sign-PoetryShim -ShimPath $pmShimPath
-                if ((@($shimSign.Failed).Count -gt 0) -or ($shimSign.Signed -lt 1)) {
-                    throw ("{0} executable signing failed or signed 0 files." -f $ctx.PackageManager)
-                }
-            } | Out-Null
-        }
-
-        # 4. Configure PM (Poetry: virtualenvs.in-project = true; UV: no-op)
-        Invoke-SetupStep -Step '4/13' -Module 'PM' -Message ("Configure {0} defaults" -f $ctx.PackageManager) -Mandatory $true -Action {
-            Invoke-PmConfigure -Ctx $ctx
-        } | Out-Null
-
-        # 5a. Clean stale env associations (Poetry: Remove-PoetryEnvs; UV: no-op)
-        Invoke-SetupStep -Step '5a/13' -Module 'PM' -Message 'Clean stale environment associations' -Mandatory $false -Action {
-            Invoke-PmCleanEnvs -Ctx $ctx
-        } | Out-Null
-
-        # 5b. Backup + remove old .venv when ForceRecreate is set.
-        #     Create a timestamped backup first so step 9 failures can roll back.
-        if ($ctx.ForceRecreateVenv) {
-            Invoke-SetupStep -Step '5b/13' -Module 'Venv' -Message 'Recreate .venv (backup + remove old environment)' -Mandatory $true -Action {
-                $ctx.VenvBackupPath = New-VenvBackup -VenvDir $ctx.VenvDir
-                if ($ctx.VenvBackupPath) {
-                    Write-LogDetail -Key 'venv_backup' -Value $ctx.VenvBackupPath
-                }
-                Remove-VenvIfExists -VenvDir $ctx.VenvDir -NonInteractive ([bool]$ctx.NonInteractive)
-            } | Out-Null
-        }
-
-        # 5c. Create .venv and pin it to the selected Python interpreter
-        $selectedPythonLabel = if ($ctx.SelectedPython) { $ctx.SelectedPython.Version } else { '<unresolved>' }
-        Invoke-SetupStep -Step '5c/13' -Module 'PM' -Message ("Prepare .venv with {0} (Python {1})" -f $ctx.PackageManager, $selectedPythonLabel) -Mandatory $true -Action {
-            Write-LogDetail -Key 'python_exe' -Value $ctx.SelectedPython.Exe
-            Write-LogDetail -Key 'venv_dir'   -Value $ctx.VenvDir
-            Invoke-PmPrepareVenv -Ctx $ctx
-        } | Out-Null
-
-        # 6. Validate .venv
-        Invoke-SetupStep -Step '6/13' -Module 'Venv' -Message 'Validate .venv structure' -Mandatory $true -Action {
-            Confirm-VenvExists -VenvDir $ctx.VenvDir
-            Write-LogDetail -Key 'venv_dir' -Value $ctx.VenvDir
-        } | Out-Null
-
-        # 7. Copy Python DLL into .venv
-        Invoke-SetupStep -Step '7/13' -Module 'Venv' -Message 'Copy python runtime DLL into .venv' -Mandatory $true -Action {
-            Write-LogDetail -Key 'dll_name' -Value $ctx.SelectedPython.DllName
-            Copy-PythonDllToVenv -DllSourceDir $ctx.SelectedPython.Directory -VenvDir $ctx.VenvDir -DllName $ctx.SelectedPython.DllName
-        } | Out-Null
-
-        # 8. Sync lock file with pyproject.toml.
-        #    PinExact mode: 'uv lock' / 'poetry lock' to add/remove deps without upgrade.
-        #    Upgrade modes: skipped — the upgrade step (9) rewrites the lock itself.
-        $step8Mode = if ($ctx.PinExact) { 'pin' } `
-                     elseif ($ctx.UpgradePackages -and $ctx.UpgradePackages.Count -gt 0) { 'selective' } `
-                     else { 'upgrade' }
-
-        if ($step8Mode -eq 'pin') {
-            Invoke-SetupStep -Step '8/13' -Module 'PM' -Message ("Sync lock file with pyproject.toml ({0} lock, pin-exact mode)" -f $ctx.PackageManager) -Mandatory $true -Action {
-                $lockFile = Join-Path $ctx.ProjectRoot (Get-PmLockFileName -Ctx $ctx)
-                Write-LogDetail -Key 'lock_file'    -Value $lockFile
-                Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
-                Invoke-PmLockDeps -Ctx $ctx
-            } | Out-Null
+            Invoke-SetupPipelineStep -Step $updateStep -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
         } else {
-            # upgrade-all or selective: lock file will be rewritten by the upgrade command in step 9.
-            $lockFile = Join-Path $ctx.ProjectRoot (Get-PmLockFileName -Ctx $ctx)
-            Write-LogDetail -Key '8/13 lock' -Value ("present={0}; step 9 will re-resolve ({1})" -f (Test-Path $lockFile -PathType Leaf), $step8Mode)
+            $steps = New-FullSetupPipeline -Ctx $ctx -DigiCertUtilityExe $DigiCertUtilityExe -KernelDriverSigning:$KernelDriverSigning -RequirePmShimSigning:$RequirePmShimSigning -StopOnPrecheckFailure:$StopOnPrecheckFailure -SignPoetryOnly:$SignPoetryOnly -DryRun:$effectiveDryRun
+            Invoke-SetupPipeline -Steps $steps -DryRun:$effectiveDryRun -OnStart $callbacks.OnStart -OnResult $callbacks.OnResult -OnDetail $callbacks.OnDetail | Out-Null
         }
 
-        # 9. Dependency install / upgrade.
-        #    Priority (highest wins):
-        #      PinExact=true            → install exact versions from lock file
-        #      UpgradePackages non-empty → upgrade only the listed packages
-        #      (default)                → upgrade ALL packages within pyproject.toml constraints
-        if (-not $ctx.SkipPoetryInstall) {
-            if ($ctx.PinExact) {
-                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Install exact versions from lock file ({0} install)" -f $ctx.PackageManager) -Mandatory $true -Action {
-                    Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
-                    Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
-                    Write-LogDetail -Key 'mode'         -Value 'pin-exact'
-                    Invoke-PmInstallDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
-                } | Out-Null
-            } elseif ($ctx.UpgradePackages -and $ctx.UpgradePackages.Count -gt 0) {
-                $pkgList = $ctx.UpgradePackages -join ', '
-                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Upgrade selected packages ({0} upgrade-package: {1})" -f $ctx.PackageManager, $pkgList) -Mandatory $true -Action {
-                    Write-LogDetail -Key 'project_root'     -Value $ctx.ProjectRoot
-                    Write-LogDetail -Key 'include_dev'      -Value $ctx.IncludeDev
-                    Write-LogDetail -Key 'upgrade_packages' -Value ($ctx.UpgradePackages -join ', ')
-                    Write-LogDetail -Key 'mode'             -Value 'selective-upgrade'
-                    Invoke-PmUpdateSelectedDeps -Ctx $ctx -Packages $ctx.UpgradePackages -IncludeDev $ctx.IncludeDev
-                } | Out-Null
-            } else {
-                # DEFAULT: upgrade all packages within the version constraints declared in
-                # pyproject.toml.  Existing .venv is reused; only outdated packages are
-                # re-downloaded.  Equivalent to running 'uv sync --upgrade'.
-                Invoke-SetupStep -Step '9/13' -Module 'PM' -Message ("Upgrade all dependencies to latest ({0} update)" -f $ctx.PackageManager) -Mandatory $true -Action {
-                    Write-LogDetail -Key 'project_root' -Value $ctx.ProjectRoot
-                    Write-LogDetail -Key 'include_dev'  -Value $ctx.IncludeDev
-                    Write-LogDetail -Key 'mode'         -Value 'upgrade-all (default)'
-                    Invoke-PmUpdateDeps -Ctx $ctx -IncludeDev $ctx.IncludeDev
-                } | Out-Null
-            }
+        if (-not $effectiveDryRun) {
+            $configValues = @{ PinnedPoetryVersion = $ctx.PinnedPoetryVersion; PinnedUvVersion = $ctx.PinnedUvVersion }
+            if ($ctx.PmSource -eq 'cli') { $configValues.PackageManager = $ctx.PackageManager }
+            Write-SetupConfig -ProjectRoot $ctx.ProjectRoot -Values $configValues -NonInteractive:$ctx.NonInteractive -Confirm:$false | Out-Null
         }
 
-        Invoke-SetupStep -Step '9a/13' -Module 'Path' -Message 'Persist project .venv CLI tools on PATH' -Mandatory $false -Action {
-            Add-ToolDirsToPath -Directories @((Join-Path $ctx.VenvDir 'Scripts')) -Reason 'project .venv CLI' | Out-Null
-        } | Out-Null
-
-        # 10. Write .pth file - resolve site-packages path dynamically via the venv python
-        Invoke-SetupStep -Step '10/13' -Module 'Venv' -Message 'Write project .pth into site-packages' -Mandatory $true -Action {
-            if ($script:setupDryRun) {
-                $ctx.SitePackagesDir = '<would resolve from .venv python>'
-            } else {
-                $venvPythonExe = Get-VenvPythonExe -VenvDir $ctx.VenvDir
-                try {
-                    $spResult = & $venvPythonExe -c "import site; print(site.getsitepackages()[0])" 2>$null
-                    $ctx.SitePackagesDir = $spResult.Trim()
-                } catch {
-                    # Windows venv fallback if python call fails.
-                    $ctx.SitePackagesDir = Join-Path $ctx.VenvDir 'Lib\site-packages'
-                }
-            }
-            Write-LogDetail -Key 'site_packages' -Value $ctx.SitePackagesDir
-            Write-ProjectPth -ProjectRoot $ctx.ProjectRoot -SitePackagesDir $ctx.SitePackagesDir
-        } | Out-Null
-
-        # 11. VS Code settings
-        Invoke-SetupStep -Step '11/13' -Module 'VSCode' -Message 'Pin venv interpreter in .vscode/settings.json' -Mandatory $true -Action {
-            Write-LogDetail -Key 'settings_file' -Value $ctx.VscodeSettingsFile
-            Write-VSCodeInterpreterSetting -VenvDir $ctx.VenvDir -SettingsFile $ctx.VscodeSettingsFile
-        } | Out-Null
-
-        # 12. Copy tcl folder into .venv (optional)
-        Invoke-SetupStep -Step '12/13' -Module 'Tcl' -Message 'Copy tcl runtime into .venv' -Mandatory $false -Action {
-            Copy-TclToVenv -PythonDir $ctx.SelectedPython.Directory -VenvDir $ctx.VenvDir
-        } | Out-Null
-
-        # 13. Code signing of venv executables
-        # Uses $ctx.EnableCodeSigning. Missing DigiCert is a critical precheck,
-        # so a real run never reaches this step without the signer available.
-        if ($ctx.EnableCodeSigning) {
-            Invoke-SetupStep -Step '13/13' -Module 'CodeSigning' -Message 'Sign generated/downloaded .exe files in .venv\Scripts' -Mandatory $false -Action {
-                # Store in $ctx so the result is visible outside this scriptblock scope.
-                $ctx.SignResult = Sign-VenvScripts -VenvDir $ctx.VenvDir -PoetryOnly:$SignPoetryOnly
-                Write-LogDetail -Key 'signed_files' -Value $ctx.SignResult.Signed
-                Write-LogDetail -Key 'failed_files' -Value @($ctx.SignResult.Failed).Count
-            } | Out-Null
-        }
-
-        # POST-a. Clean any stale quarantine or backup directories left by prior runs
-        Invoke-SetupStep -Step 'POST-a' -Module 'Filesystem' -Message 'Clean stale .venv quarantine and backup directories' -Mandatory $false -Action {
-            $removed = Remove-StaleQuarantines -ProjectRoot $ctx.ProjectRoot
-            Write-LogDetail -Key 'removed_stale_dirs' -Value $removed
-        } | Out-Null
-
-        # POST-b. Remove the .venv backup from step 5b now that install succeeded
-        if ($ctx.VenvBackupPath) {
-            Invoke-SetupStep -Step 'POST-b' -Module 'Venv' -Message 'Remove successful .venv backup' -Mandatory $false -Action {
-                Remove-VenvBackup -BackupPath $ctx.VenvBackupPath
-                $ctx.VenvBackupPath = $null
-            } | Out-Null
-        }
-
-        # Persist the resolved settings so the next run can skip detection.
-        if (-not $script:setupDryRun) {
-            try {
-                # Never persist an auto-detected PM choice.
-                # If we did, the next run would read 'poetry' (or 'uv') from the
-                # config file and skip TOML detection entirely, even if the user
-                # has since swapped their pyproject.toml.
-                # Only persist when the user explicitly passed -PackageManager on the CLI.
-                $configValues = @{
-                    PinnedPoetryVersion = $ctx.PinnedPoetryVersion
-                    PinnedUvVersion     = $ctx.PinnedUvVersion
-                }
-                if ($ctx.PmSource -eq 'cli') {
-                    $configValues.PackageManager = $ctx.PackageManager
-                }
-                Write-SetupConfig -ProjectRoot $ctx.ProjectRoot -Values $configValues
-            } catch {
-                Write-Host ("  [WARN] Could not write .setup-config.json: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
-            }
-        }
-
-        # Done
-        $doneMessage = if ($ctx.PrechecksWouldAbort) {
-            'Dry run completed; real setup would abort at prechecks'
-        } else {
-            'Setup completed successfully'
-        }
+        Write-StructuredLog -Level INFO -Step 'DONE' -Module 'Core' -Message 'Setup completed.' -Context @{ Mode = $ctx.Mode } -NoConsole
+        $doneMessage = if ($effectiveDryRun) { 'Dry run completed' } else { 'Setup completed successfully' }
         Write-LogStepResult -Step 'DONE' -Module 'Core' -Status 'OK' -Message $doneMessage
 
-        Invoke-SetupStep -Step 'POST' -Module 'Venv' -Message 'Best-effort activate project venv in current shell' -Mandatory $false -Action {
-            Invoke-VenvActivation -ProjectRoot $ctx.ProjectRoot
-        } | Out-Null
-
-        if (-not $ctx.NonInteractive -and -not $script:setupDryRun) {
-            Read-Host 'Press Enter to exit'
+        if (-not $effectiveDryRun) {
+            try { Invoke-VenvActivation -ProjectRoot $ctx.ProjectRoot } catch { Write-Warning $_.Exception.Message }
         }
 
+        $logContext = Get-StructuredLogContext
         [pscustomobject]@{
-            ProjectRoot        = $ctx.ProjectRoot
-            ProjectName        = $ctx.ProjectName
-            RequiresPython     = $ctx.RequiresPython
-            PythonVersion      = $ctx.SelectedPython.Version
-            PythonExe          = $ctx.SelectedPython.Exe
-            PythonSource       = $ctx.SelectedPython.Source
-            PackageManager     = $ctx.PackageManager
-            PmSource           = $ctx.PmSource
-            # Generic PM runtime fields - valid for both uv and poetry
-            PmPythonPath       = $ctx.PmPythonPath
-            PmShimPath         = if ($ctx.UvInfo)     { $ctx.UvInfo.Exe }          `
-                                 elseif ($ctx.PoetryInfo) { $ctx.PoetryInfo.ShimPath } `
-                                 else { $null }
-            # Poetry-specific fields (null when PackageManager='uv')
-            PoetryPython       = $ctx.PoetryPythonPath
-            PoetryShimPath     = if ($ctx.PoetryInfo) { $ctx.PoetryInfo.ShimPath } else { $null }
-            PoetrySource       = if ($ctx.PoetryInfo) { $ctx.PoetryInfo.Source   } else { $null }
-            VenvDir            = $ctx.VenvDir
-            SitePackages       = $ctx.SitePackagesDir
-            VscodeSettingsFile = $ctx.VscodeSettingsFile
-            SkipInstall        = $ctx.SkipPoetryInstall
-            ForceRecreateVenv  = $ctx.ForceRecreateVenv
-            Signing            = if ($ctx.SignResult) {
-                                    [pscustomobject]@{
-                                        Attempted = $true
-                                        Total     = $ctx.SignResult.Total
-                                        Signed    = $ctx.SignResult.Signed
-                                        Failed    = @($ctx.SignResult.Failed).Count
-                                    }
-                                 } else { $null }
+            ProjectRoot = $ctx.ProjectRoot
+            ProjectName = $ctx.ProjectName
+            RequiresPython = $ctx.RequiresPython
+            PythonVersion = if ($ctx.SelectedPython) { $ctx.SelectedPython.Version } else { $null }
+            PythonExe = if ($ctx.SelectedPython) { $ctx.SelectedPython.Exe } else { $null }
+            PackageManager = $ctx.PackageManager
+            PmSource = $ctx.PmSource
+            VenvDir = $ctx.VenvDir
+            SitePackages = $ctx.SitePackagesDir
+            Mode = $ctx.Mode
+            CorrelationId = $correlationId
+            LogFile = $logContext.LogFilePath
+            Signing = if ($ctx.SignResult) {
+                [pscustomobject]@{
+                    Total = $ctx.SignResult.Total
+                    Signed = $ctx.SignResult.Signed
+                    NewlySigned = $ctx.SignResult.NewlySigned
+                    Skipped = $ctx.SignResult.Skipped
+                    Failed = @($ctx.SignResult.Failed).Count
+                }
+            } else { $null }
         }
-
-    } catch {
-        $details = Get-SetupErrorDetails -ErrorRecord $_
-
-        # If the error was thrown by a mandatory Invoke-SetupStep, that step
-        # already printed a full ERROR block.  We only add the outer summary
-        # (with the step label) so the user can see at a glance which stage
-        # caused the fatal failure - without duplicating the detail lines.
-        $failStep   = if ($script:setupCurrentStep)   { $script:setupCurrentStep }   else { 'FAIL' }
-        $failModule = if ($script:setupCurrentModule) { $script:setupCurrentModule } else { $details.Command }
+    }
+    catch {
+        $setupError = ConvertTo-SetupException -ErrorRecord $_ -ErrorCode 'SETUP_FAILED' -Step $script:setupCurrentStep -Context @{ Module = $script:setupCurrentModule }
+        try { Write-StructuredLog -Level ERROR -Step $setupError.Step -Module $script:setupCurrentModule -Message $setupError.Message -Context @{ ErrorCode = $setupError.ErrorCode } -NoConsole } catch { }
 
         Write-Host ''
         Write-Host ('+' + ('-' * 94) + '+') -ForegroundColor Red
-        Write-Host ("| [FATAL] Pipeline stopped at step {0} (module: {1})" -f $failStep, $failModule) -ForegroundColor Red
-        Write-Host ("|   - message  : {0}" -f $details.Message)   -ForegroundColor Red
-        Write-Host ("|   - location : {0}" -f $details.Location)  -ForegroundColor DarkGray
-        Write-Host ("|   - error_id : {0}" -f $details.ErrorId)   -ForegroundColor DarkGray
+        Write-Host ("| [FATAL] Pipeline stopped at step {0} (module: {1})" -f $setupError.Step, $script:setupCurrentModule) -ForegroundColor Red
+        Write-Host ("|   - error_code : {0}" -f $setupError.ErrorCode) -ForegroundColor Red
+        Write-Host ("|   - message    : {0}" -f $setupError.Message) -ForegroundColor Red
         Write-Host ('+' + ('-' * 94) + '+') -ForegroundColor Red
 
-        # Attempt to restore the .venv backup from step 5b so the project
-        # is not left without a working environment after a failed recreate.
-        if ($null -ne $ctx -and $ctx.ContainsKey('VenvBackupPath') -and $ctx.VenvBackupPath) {
-            Write-Host ''
-            Write-Host '  [ROLLBACK] Attempting to restore .venv from backup ...' -ForegroundColor Yellow
-            try {
-                Restore-VenvBackup -BackupPath $ctx.VenvBackupPath -VenvDir $ctx.VenvDir
-            } catch {
-                Write-Host ("  [ROLLBACK] Restore failed: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
-            }
+        if ($ctx -and $ctx.VenvBackupPath) {
+            try { Restore-VenvBackup -BackupPath $ctx.VenvBackupPath -VenvDir $ctx.VenvDir } catch { Write-Warning ("Rollback failed: {0}" -f $_.Exception.Message) }
         }
-
-        if (-not $NonInteractive) {
-            Read-Host "`nPress Enter to exit"
-        }
-        throw
+        throw $setupError
     }
 }
 

@@ -1,14 +1,6 @@
 # =============================================================================
 # azure-pipelines.yml - Validate / Build / Publish for PythonVenvAutomation
-# -----------------------------------------------------------------------------
-# - Pull requests        -> Validate only.
-# - Pushes to branches   -> Validate (+ Build).
-# - Version tags (v*)    -> Validate + Build + Publish to Azure Artifacts.
-#
-# Adapt by changing ONLY the variables block below. Secrets (the feed API key)
-# must come from a secure pipeline variable named NUGET_API_KEY - never inline.
 # =============================================================================
-
 variables:
   PSRepositoryName: 'CompanyPS'
   PSRepositoryUri: 'https://pkgs.dev.azure.com/REPLACE_ORG/REPLACE_PROJECT/_packaging/REPLACE_FEED/nuget/v3/index.json'
@@ -31,12 +23,11 @@ pool:
   vmImage: 'windows-latest'
 
 stages:
-  # ---------------------------------------------------------------------------
   - stage: Validate
     displayName: Validate
     jobs:
       - job: validate
-        displayName: Static checks + Pester
+        displayName: Pester + coverage
         steps:
           - task: PowerShell@2
             displayName: Ensure tooling (PSResourceGet + Pester)
@@ -52,13 +43,19 @@ stages:
                   Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
                 }
           - task: PowerShell@2
-            displayName: Run validation
+            displayName: Run Pester + 70% coverage gate
             inputs:
               targetType: inline
               pwsh: true
-              script: ./build/Test.ps1
+              script: ./Run-Tests.ps1 -MinimumCoverage 70
+          - task: PublishTestResults@2
+            displayName: Publish Pester results
+            condition: always()
+            inputs:
+              testResultsFormat: NUnit
+              testResultsFiles: 'test-results.xml'
+              failTaskOnFailedTests: true
 
-  # ---------------------------------------------------------------------------
   - stage: Build
     displayName: Build
     dependsOn: Validate
@@ -75,16 +72,12 @@ stages:
               script: ./build/Build.ps1
           - publish: artifacts
             artifact: PythonVenvAutomation
-            displayName: Publish pipeline artifact
           - publish: install.ps1
             artifact: installer
-            displayName: Publish installer (install.ps1)
 
-  # ---------------------------------------------------------------------------
   - stage: Publish
     displayName: Publish
     dependsOn: Build
-    # Only publish for version tags (v1.2.3).
     condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
     jobs:
       - job: publish
@@ -102,10 +95,7 @@ stages:
                 if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
                   Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
                 }
-                # Rebuild the staging tree on this agent, then publish it.
                 ./build/Build.ps1 | Out-Null
                 ./build/Publish.ps1 -RepositoryName "$(PSRepositoryName)" -RepositoryUri "$(PSRepositoryUri)" -ApiKey "$(NUGET_API_KEY)"
             env:
-              # Secure pipeline variable. Mapped here so it is masked in logs and
-              # never printed. Define NUGET_API_KEY as a secret variable/library.
               NUGET_API_KEY: $(NUGET_API_KEY)

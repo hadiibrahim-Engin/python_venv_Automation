@@ -1,12 +1,5 @@
 # =============================================================================
 # publish.yml - Validate / Build / Publish for PythonVenvAutomation (GitHub)
-# -----------------------------------------------------------------------------
-# - Pull requests        -> validate only.
-# - Pushes to main       -> validate + build.
-# - Version tags (v*)    -> validate + build + publish to GitHub Packages.
-#
-# Adapt by changing ONLY the env block below. The publish job authenticates with
-# GITHUB_TOKEN (or a configured secret) and never prints it.
 # =============================================================================
 name: PythonVenvAutomation CI/CD
 
@@ -35,9 +28,18 @@ jobs:
           if (-not (Get-Module -ListAvailable Pester | Where-Object Version -ge '5.0')) {
             Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
           }
-      - name: Validate
+      - name: Run Pester + coverage gate
         shell: pwsh
-        run: ./build/Test.ps1
+        run: ./Run-Tests.ps1 -MinimumCoverage 70
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            coverage.xml
+          if-no-files-found: ignore
 
   build:
     needs: validate
@@ -61,11 +63,10 @@ jobs:
   publish:
     needs: build
     runs-on: windows-latest
-    # Only publish for version tags (refs/tags/v*).
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: write   # allow attaching install.ps1 to the GitHub Release
-      packages: write   # allow publishing to GitHub Packages
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Ensure tooling
@@ -77,8 +78,6 @@ jobs:
       - name: Build + publish to GitHub Packages
         shell: pwsh
         env:
-          # GITHUB_TOKEN is provided automatically and masked in logs. Swap for a
-          # PAT secret if your org requires one for Packages.
           NUGET_API_KEY: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
