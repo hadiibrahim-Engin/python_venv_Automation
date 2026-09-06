@@ -114,7 +114,7 @@ function Write-SetupConfig {
         return $true
     }
     catch {
-        $message = "Could not persist $script:ConfigFileName: $($_.Exception.Message)"
+        $message = "Could not persist ${script:ConfigFileName}: $($_.Exception.Message)"
         $isCi = ($env:CI -match '^(1|true|yes)$')
         if ($NonInteractive -or $isCi) {
             throw $message
