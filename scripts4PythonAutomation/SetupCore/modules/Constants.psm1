@@ -6,29 +6,32 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Keep this module data-only. Callers receive a copy so they cannot mutate the
-# shared defaults accidentally during a setup run.
 $script:SetupConstants = [ordered]@{
     ConfigFileName = '.setup-config.json'
 
     PackageManagers = [ordered]@{
-        Auto   = 'auto'
-        Uv     = 'uv'
-        Poetry = 'poetry'
+        Auto            = 'auto'
+        Uv              = 'uv'
+        Poetry          = 'poetry'
         PipRequirements = 'pip-requirements'
     }
 
     Git = [ordered]@{
-        RemoteName          = 'origin'
-        FetchTimeoutSeconds = 10  # bounded remote call; avoids hanging setup on VPN/credential/network failures
-        MaxTimeoutSeconds   = 120
-        DefaultPullStrategy = 'SkipIfDirty'
+        RemoteName            = 'origin'
+        FetchTimeoutSeconds   = 10   # bounded remote call; avoids hanging setup on VPN/credential/network failures
+        MaxTimeoutSeconds     = 120
+        DefaultPullStrategy   = 'SkipIfDirty'
         AllowedPullStrategies = @('SkipIfDirty', 'ErrorIfDirty')
     }
 
+    Network = [ordered]@{
+        ProbeTimeoutMs = 3000 # probes run concurrently, so total precheck latency stays near 3s instead of N x 3s
+    }
+
     Input = [ordered]@{
-        MaxBooleanTextLength = 10 # enough for true/false/yes/no/on/off while rejecting unexpectedly large input
+        MaxBooleanTextLength  = 10
         MaxStrategyTextLength = 32
+        MaxInteractiveLength  = 1024
     }
 
     CodeSigning = [ordered]@{
@@ -36,8 +39,11 @@ $script:SetupConstants = [ordered]@{
     }
 
     Retry = [ordered]@{
-        MaxRetry = 8   # historical retry budget; at ~700 ms backoff this is roughly five seconds of waiting
-        DelayMs  = 700
+        MaxRetry         = 8   # historical robust-delete retry budget; with 700 ms delay this is roughly five seconds
+        DelayMs          = 700
+        CleanupMaxRetry  = 3   # stale directories are best-effort cleanup and should not block setup for long
+        CleanupDelayMs   = 400
+        QuarantineDelayS = 5   # give file handles time to close before background deletion retries
     }
 }
 
@@ -57,8 +63,6 @@ function Get-SetupConstants {
     [CmdletBinding()]
     param()
 
-    # JSON round-trip gives us a deep copy and is compatible with Windows
-    # PowerShell 5.1, which this project still supports.
     $script:SetupConstants | ConvertTo-Json -Depth 6 | ConvertFrom-Json
 }
 
