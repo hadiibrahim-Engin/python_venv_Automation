@@ -44,7 +44,9 @@ param(
     [Parameter()] [switch] $AllowPythonInstall,
     [Parameter()] [switch] $SkipPythonInstall,
     [Parameter()] [string] $UpgradePackage = '',
-    [Parameter()] [switch] $UnblockScripts
+    [Parameter()] [switch] $UnblockScripts,
+    [Parameter()] [switch] $SkipGitPull,
+    [Parameter()] [switch] $ForceGitPull
 )
 
 Set-StrictMode -Version Latest
