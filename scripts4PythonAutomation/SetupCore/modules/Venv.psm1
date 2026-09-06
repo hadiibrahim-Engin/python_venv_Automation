@@ -1,69 +1,55 @@
 #Requires -Version 5.1
 # =============================================================================
 # Module  : Venv.psm1
-
-# Author  : Hadi Ibrahim
+# Purpose : Virtual-environment lifecycle helpers with ShouldProcess support.
 # =============================================================================
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-<#
-.SYNOPSIS
-    Virtual-environment lifecycle helpers.
-
-.DESCRIPTION
-    Provides deletion/recreation support, structural validation, activation,
-    and post-create helpers such as DLL copy and .pth file creation.
-#>
-
 $import = 'Microsoft.PowerShell.Core\Import-Module'
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Constants.psm1')     -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')            -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Filesystem.psm1')    -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Compat.psm1')        -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Versioning.psm1')    -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'NativeCommand.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
+function Remove-VenvIfExists {
 <#
 .SYNOPSIS
     Removes an existing .venv directory with robust fallback behavior.
 
-.DESCRIPTION
-    Stops running venv processes, retries deletion, and quarantines locked
-    environments when direct deletion is not possible.
+.EXAMPLE
+    Remove-VenvIfExists -VenvDir '.\.venv' -WhatIf
 #>
-function Remove-VenvIfExists {
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [Parameter(Mandatory=$true)][string] $VenvDir,
+        [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $VenvDir,
         [bool] $NonInteractive = $false
     )
-    if (Test-Path -LiteralPath $VenvDir) {
-        Write-Host 'Force-removing existing .venv (stop running processes, clear attributes) ...' -ForegroundColor Yellow
-        Stop-VenvProcesses -VenvDir $VenvDir
 
-        $removed = Remove-PathRobust -Path $VenvDir -MaxRetry 8 -DelayMs 700
-        if (-not $removed) {
-            Write-Host 'Direct removal failed - attempting quarantine/rename ...' -ForegroundColor Yellow
-            $q = Move-PathToQuarantine -Path $VenvDir
-            if ($q) {
-                Write-Banner ".venv quarantined to '$q' (will be removed when files are released)" 'WARN'
-            } else {
-                Exit-WithError -Message "Could not remove or quarantine .venv - close any processes using it and retry." -NonInteractive ([bool]$NonInteractive)
-            }
+    if (-not (Test-Path -LiteralPath $VenvDir)) { return }
+    if (-not $PSCmdlet.ShouldProcess($VenvDir, 'Remove existing virtual environment')) { return }
+
+    $constants = Get-SetupConstants
+    Stop-VenvProcesses -VenvDir $VenvDir -Confirm:$false
+    $removed = Remove-PathRobust -Path $VenvDir -MaxRetry ([int]$constants.Retry.MaxRetry) -DelayMs ([int]$constants.Retry.DelayMs) -Confirm:$false
+    if (-not $removed) {
+        $q = Move-PathToQuarantine -Path $VenvDir -Confirm:$false
+        if ($q) {
+            Write-Banner ".venv quarantined to '$q' (will be removed when files are released)" 'WARN'
         } else {
-            Write-Banner '.venv removed.' 'SUCCESS'
+            Exit-WithError -Message 'Could not remove or quarantine .venv - close any processes using it and retry.' -NonInteractive ([bool]$NonInteractive)
         }
+    } else {
+        Write-Banner '.venv removed.' 'SUCCESS'
     }
 }
 
-<#
-.SYNOPSIS
-    Validates that .venv exists and contains required core artifacts.
-
-.DESCRIPTION
-    Ensures setup does not continue with a partial or corrupted environment.
-#>
 function Confirm-VenvExists {
-    param([Parameter(Mandatory=$true)][string] $VenvDir)
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string] $VenvDir)
+
     if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) {
         throw '.venv directory was not created. Check the package-manager output above.'
     }
@@ -73,22 +59,14 @@ function Confirm-VenvExists {
         [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\Activate.ps1')),
         [System.IO.Path]::GetFullPath((Join-Path $VenvDir 'Scripts\python.exe'))
     )
-
     $missing = @($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
     if ($missing.Count -gt 0) {
         throw ('.venv exists but is incomplete. Missing required file(s): {0}' -f ($missing -join ', '))
     }
 }
 
-<#
-.SYNOPSIS
-    Validates that an existing .venv uses a compatible Python interpreter.
-
-.DESCRIPTION
-    Reuse is only safe when the venv Python satisfies pyproject.toml and, for
-    explicit interpreter requests, matches the selected major/minor line.
-#>
 function Confirm-VenvPythonCompatible {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string] $VenvDir,
         [Parameter(Mandatory=$true)][System.Collections.Generic.List[hashtable]] $Constraints,
@@ -98,29 +76,22 @@ function Confirm-VenvPythonCompatible {
     )
 
     if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) { return }
-
     $venvPython = Get-VenvPythonExe -VenvDir $VenvDir
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
         throw (".venv exists but its Python executable is missing: {0}." -f $venvPython)
     }
 
     $probeCode = "import sys; print('{}.{}.{}'.format(*sys.version_info[:3])); print(getattr(sys, '_base_executable', '') or sys.executable)"
-    $probe = Invoke-NativeCommand -Executable $venvPython -Arguments @('-c', $probeCode) -Quiet -NoLog
+    $probe = Invoke-NativeCommand -Executable $venvPython -Arguments @('-c',$probeCode) -Quiet -NoLog
     if (-not $probe.Succeeded) {
         throw (".venv exists but its Python could not be started (exit {0}): {1}." -f $probe.ExitCode, $venvPython)
     }
 
     $lines = @($probe.StdOut -split "`r?`n" | Where-Object { $_ })
-    if ($lines.Count -lt 1) {
-        throw (".venv Python did not report a version: {0}." -f $venvPython)
-    }
+    if ($lines.Count -lt 1) { throw (".venv Python did not report a version: {0}." -f $venvPython) }
 
-    $venvVersion = $null
-    try {
-        $venvVersion = [Version]($lines[0].Trim())
-    } catch {
-        throw (".venv Python reported an unparseable version '{0}'." -f $lines[0])
-    }
+    try { $venvVersion = [Version]($lines[0].Trim()) }
+    catch { throw (".venv Python reported an unparseable version '{0}'." -f $lines[0]) }
 
     if (-not (Test-VersionConstraints -Version $venvVersion -Constraints $Constraints)) {
         throw (".venv uses Python {0}, which does not satisfy requires-python '{1}'." -f $venvVersion, $RequiresPythonRaw)
@@ -137,25 +108,12 @@ function Confirm-VenvPythonCompatible {
     Write-Host ("  Existing .venv Python OK: {0} ({1})" -f $venvVersion, $baseExe) -ForegroundColor DarkGray
 }
 
+function Resolve-VenvReuseOrRecreate {
 <#
 .SYNOPSIS
-    Confirms an existing .venv can be reused, recreating it automatically when it can't.
-
-.DESCRIPTION
-    Wraps Confirm-VenvPythonCompatible. A failure there (missing/broken
-    interpreter, or a venv that no longer satisfies requires-python / the
-    requested interpreter) means reuse is unsafe - rather than aborting setup,
-    this backs up the old .venv (New-VenvBackup) and removes it
-    (Remove-VenvIfExists), using the same backup/restore safety net as an
-    explicit -ForceRecreateVenv run, so the caller can create a fresh .venv.
-
-.OUTPUTS
-    $null when the existing .venv is compatible and should be reused as-is.
-    Otherwise a [pscustomobject] with a BackupPath property (the renamed
-    backup directory, or $null if the backup rename itself failed) signaling
-    the caller must (re)create .venv.
+    Reuses a compatible venv or safely backs up/removes an incompatible one.
 #>
-function Resolve-VenvReuseOrRecreate {
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
         [Parameter(Mandatory=$true)][string] $VenvDir,
         [Parameter(Mandatory=$true)][System.Collections.Generic.List[hashtable]] $Constraints,
@@ -166,153 +124,125 @@ function Resolve-VenvReuseOrRecreate {
     )
 
     try {
-        Confirm-VenvPythonCompatible `
-            -VenvDir               $VenvDir `
-            -Constraints           $Constraints `
-            -RequiresPythonRaw     $RequiresPythonRaw `
-            -SelectedPython        $SelectedPython `
-            -RequireSelectedPython $RequireSelectedPython
+        Confirm-VenvPythonCompatible -VenvDir $VenvDir -Constraints $Constraints -RequiresPythonRaw $RequiresPythonRaw -SelectedPython $SelectedPython -RequireSelectedPython $RequireSelectedPython
         return $null
-    } catch {
+    }
+    catch {
         Write-Banner ("Existing .venv can't be reused ({0}) - recreating automatically." -f $_.Exception.Message) 'WARN'
-        $backupPath = New-VenvBackup -VenvDir $VenvDir
-        Remove-VenvIfExists -VenvDir $VenvDir -NonInteractive $NonInteractive
-        return [pscustomobject]@{ BackupPath = $backupPath }
+        if (-not $PSCmdlet.ShouldProcess($VenvDir, 'Backup and recreate incompatible virtual environment')) { return $null }
+        $backupPath = New-VenvBackup -VenvDir $VenvDir -Confirm:$false
+        Remove-VenvIfExists -VenvDir $VenvDir -NonInteractive $NonInteractive -Confirm:$false
+        [pscustomobject]@{ BackupPath = $backupPath }
     }
 }
 
-<#
-.SYNOPSIS
-    Copies a Python runtime DLL into the virtual environment root.
-#>
 function Copy-PythonDllToVenv {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(Mandatory=$true)][string] $DllSourceDir,
         [Parameter(Mandatory=$true)][string] $VenvDir,
         [Parameter(Mandatory=$true)][string] $DllName
     )
+
     $dllSrc = [System.IO.Path]::GetFullPath((Join-Path $DllSourceDir $DllName))
     if (Test-Path -LiteralPath $dllSrc -PathType Leaf) {
-        Copy-Item -LiteralPath $dllSrc -Destination $VenvDir -Force
-        Write-Banner "$DllName copied to .venv." 'SUCCESS'
+        if ($PSCmdlet.ShouldProcess($VenvDir, "Copy $DllName")) {
+            Copy-Item -LiteralPath $dllSrc -Destination $VenvDir -Force
+            Write-Banner "$DllName copied to .venv." 'SUCCESS'
+        }
     } else {
         Write-Banner ("$DllName not found at: {0} -- skipping." -f $dllSrc) 'WARN'
     }
 }
 
-<#
-.SYNOPSIS
-    Writes a .pth file pointing site-packages to the project root.
-#>
 function Write-ProjectPth {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(Mandatory=$true)][string] $ProjectRoot,
         [Parameter(Mandatory=$true)][string] $SitePackagesDir
     )
+
+    $pthName = (Split-Path $ProjectRoot -Leaf) -replace '[^a-zA-Z0-9]', '_'
+    $pthFile = [System.IO.Path]::GetFullPath((Join-Path $SitePackagesDir "$pthName.pth"))
+    if (-not $PSCmdlet.ShouldProcess($pthFile, 'Write project path file')) { return }
+
     if (-not (Test-Path -LiteralPath $SitePackagesDir -PathType Container)) {
         New-Item -ItemType Directory -LiteralPath $SitePackagesDir | Out-Null
     }
-    $pthName = (Split-Path $ProjectRoot -Leaf) -replace '[^a-zA-Z0-9]', '_'
-    $pthFile = [System.IO.Path]::GetFullPath((Join-Path $SitePackagesDir "$pthName.pth"))
     $ProjectRoot | Set-Content -LiteralPath $pthFile -Encoding UTF8
 }
 
-<#
-.SYNOPSIS
-    Best-effort activation of the project venv in the current shell.
-#>
 function Invoke-VenvActivation {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param([Parameter(Mandatory=$true)][string] $ProjectRoot)
+
     $activateScript = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'scripts4PythonAutomation\activate-venv.ps1'))
-    if (Test-Path -LiteralPath $activateScript -PathType Leaf) {
-        Write-Host 'Activating project venv in current shell ...' -ForegroundColor Yellow
-        try {
-            . $activateScript
-            Write-Banner 'Project venv activated.' 'SUCCESS'
-        } catch {
-            Write-Banner ("Could not auto-activate venv: {0}" -f $_.Exception.Message) 'WARN'
-        }
-    } else {
+    if (-not (Test-Path -LiteralPath $activateScript -PathType Leaf)) {
         Write-Banner 'Venv activation script not found -- skipping auto-activation.' 'WARN'
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess($activateScript, 'Activate project venv in current shell')) { return }
+
+    try {
+        . $activateScript
+        Write-Banner 'Project venv activated.' 'SUCCESS'
+    } catch {
+        Write-Banner ("Could not auto-activate venv: {0}" -f $_.Exception.Message) 'WARN'
     }
 }
 
-<#
-.SYNOPSIS
-    Creates a timestamped backup of the existing .venv directory.
-
-.DESCRIPTION
-    Renames .venv to .venv_backup_<timestamp> before a destructive recreation
-    so setup can restore it if the new install fails.
-
-.OUTPUTS
-    The backup path string, or $null if no .venv existed.
-#>
 function New-VenvBackup {
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param([Parameter(Mandatory=$true)][string] $VenvDir)
 
-    if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) {
-        return $null
-    }
-
-    $stamp      = Get-Date -Format 'yyyyMMdd_HHmmss'
+    if (-not (Test-Path -LiteralPath $VenvDir -PathType Container)) { return $null }
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $backupPath = "{0}_backup_{1}" -f $VenvDir, $stamp
+    if (-not $PSCmdlet.ShouldProcess($VenvDir, "Rename to backup $backupPath")) { return $null }
 
     try {
         Rename-Item -LiteralPath $VenvDir -NewName $backupPath -ErrorAction Stop
         Write-Host ("  Backed up existing .venv to: {0}" -f (Split-Path $backupPath -Leaf)) -ForegroundColor DarkGray
-        return $backupPath
+        $backupPath
     } catch {
-        Write-Host ("  Could not back up .venv: {0} - proceeding without backup." -f $_.Exception.Message) -ForegroundColor DarkYellow
-        return $null
+        Write-Warning ("Could not back up .venv: {0}; proceeding without backup." -f $_.Exception.Message)
+        $null
     }
 }
 
-<#
-.SYNOPSIS
-    Restores a previously created .venv backup on setup failure.
-
-.DESCRIPTION
-    Renames the backup directory back to the original .venv path.
-    No-ops when BackupPath is null/empty or when the target already exists
-    (meaning a partial new .venv was created and must be cleaned up first).
-#>
 function Restore-VenvBackup {
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
         [string] $BackupPath,
         [Parameter(Mandatory=$true)][string] $VenvDir
     )
 
-    if (-not $BackupPath) { return }
-    if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) { return }
+    if (-not $BackupPath -or -not (Test-Path -LiteralPath $BackupPath -PathType Container)) { return }
+    if (-not $PSCmdlet.ShouldProcess($VenvDir, "Restore virtual environment from $BackupPath")) { return }
 
-    # Remove any partial new .venv so the rename can succeed
+    $constants = Get-SetupConstants
     if (Test-Path -LiteralPath $VenvDir) {
-        Remove-PathRobust -Path $VenvDir -MaxRetry 4 -DelayMs 500 | Out-Null
+        Remove-PathRobust -Path $VenvDir -MaxRetry ([int]$constants.Retry.MaxRetry) -DelayMs ([int]$constants.Retry.DelayMs) -Confirm:$false | Out-Null
     }
 
     try {
         Rename-Item -LiteralPath $BackupPath -NewName $VenvDir -ErrorAction Stop
         Write-Host ("  Restored .venv from backup: {0}" -f (Split-Path $BackupPath -Leaf)) -ForegroundColor Yellow
     } catch {
-        Write-Host ("  Could not restore .venv backup '{0}': {1}" -f (Split-Path $BackupPath -Leaf), $_.Exception.Message) -ForegroundColor DarkYellow
+        Write-Warning ("Could not restore .venv backup '{0}': {1}" -f (Split-Path $BackupPath -Leaf), $_.Exception.Message)
     }
 }
 
-<#
-.SYNOPSIS
-    Deletes a successful .venv backup after setup completes successfully.
-#>
 function Remove-VenvBackup {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param([string] $BackupPath)
 
-    if (-not $BackupPath) { return }
-    if (-not (Test-Path -LiteralPath $BackupPath)) { return }
+    if (-not $BackupPath -or -not (Test-Path -LiteralPath $BackupPath)) { return }
+    if (-not $PSCmdlet.ShouldProcess($BackupPath, 'Remove successful venv backup')) { return }
 
-    if (Remove-PathRobust -Path $BackupPath -MaxRetry 3 -DelayMs 400) {
-        Write-Host ("  Removed .venv backup: {0}" -f (Split-Path $BackupPath -Leaf)) -ForegroundColor DarkGray
-    } else {
-        Write-Host ("  Could not remove .venv backup (still locked): {0}" -f (Split-Path $BackupPath -Leaf)) -ForegroundColor DarkYellow
+    $constants = Get-SetupConstants
+    if (-not (Remove-PathRobust -Path $BackupPath -MaxRetry ([int]$constants.Retry.CleanupMaxRetry) -DelayMs ([int]$constants.Retry.CleanupDelayMs) -Confirm:$false)) {
+        Write-Warning ("Could not remove .venv backup (still locked): {0}" -f (Split-Path $BackupPath -Leaf))
     }
 }
 
