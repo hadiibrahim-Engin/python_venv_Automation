@@ -70,7 +70,10 @@ flowchart TD
 
     K -->|Yes + ErrorIfDirty| K2[Abort setup]
 
-    K -->|Yes + ForceGitPull| L[Explicit git reset --hard upstream]
+    K -->|Yes + ForceGitPull| RR[New-GitRecoveryRef<br/>refs/devsetup-backup/&lt;timestamp&gt; = HEAD]
+    RR --> RRF{Ref created?}
+    RRF -->|No| RRA[Abort - no destructive reset<br/>without a recovery point]
+    RRF -->|Yes| L[Explicit git reset --hard upstream]
     L --> M{Untracked files remain?}
     M -->|Yes| M1[Abort - never git clean automatically]
     M -->|No| Z
@@ -197,6 +200,32 @@ git clean -fd
 `git reset --hard` only affects tracked state. After the reset, GitSync checks the repository again.
 
 If untracked or outstanding files remain, setup stops with an error rather than deleting them.
+
+## Recovery ref before a forced reset
+
+`git reset --hard` discards local commits. They stay reachable through the
+reflog, but the reflog expires. Before anything destructive runs,
+`New-GitRecoveryRef` writes the current HEAD to a real ref:
+
+```text
+refs/devsetup-backup/20260906-221500
+```
+
+Creating that ref is mandatory: if it cannot be written, the reset is refused.
+The ref name is returned on the result object and printed as a warning, so the
+pre-reset state can always be restored:
+
+```powershell
+git reset --hard refs/devsetup-backup/20260906-221500
+```
+
+List previous recovery points with:
+
+```powershell
+git for-each-ref refs/devsetup-backup/
+```
+
+`git clean` is still never run automatically - untracked files are user data.
 
 ---
 
@@ -418,7 +447,11 @@ Behind
 Dirty
 Changed
 Message
+RecoveryRef
 ```
+
+`RecoveryRef` is populated only for a forced reset and names the ref that holds
+the pre-reset HEAD.
 
 Representative status values include:
 
