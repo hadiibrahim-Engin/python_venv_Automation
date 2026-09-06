@@ -28,6 +28,7 @@ $import = 'Microsoft.PowerShell.Core\Import-Module'
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'UI.psm1')     -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Toml.psm1')   -Force -DisableNameChecking -ErrorAction Stop
 & $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Config.psm1') -Force -DisableNameChecking -ErrorAction Stop
+& $import -FullyQualifiedName (Join-Path $PSScriptRoot 'Errors.psm1')  -Force -DisableNameChecking -ErrorAction Stop
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,11 @@ function Resolve-PackageManager {
 #>
     param(
         [Parameter(Mandatory=$true)][string] $CliChoice,
-        [Parameter(Mandatory=$true)][string] $ProjectRoot
+        [Parameter(Mandatory=$true)][string] $ProjectRoot,
+
+        # When set, an ambiguous project is a hard error instead of a prompt.
+        # CI and every scripted caller must pass this.
+        [Parameter()][switch] $NonInteractive
     )
 
     # Priority 1: explicit CLI override
@@ -88,10 +93,21 @@ function Resolve-PackageManager {
         }
     }
 
-    # Priority 3 & 4: TOML scan + built-in default
-    # Get-PmDetectionReport handles both (defaults to 'poetry' when no signal).
+    # Priority 3 & 4: TOML scan + built-in default.
     $report = Get-PmDetectionReport -ProjectRoot $ProjectRoot
-    $src    = if ($report.Reason -eq 'no signal found - using default') { 'default' } else { 'detected' }
+
+    if ($report.Status -eq 'Ambiguous') {
+        # Never guess. Either the operator decides, or we stop.
+        $choice = Resolve-AmbiguousPackageManager -Report $report -ProjectRoot $ProjectRoot -NonInteractive:$NonInteractive
+        return [pscustomobject]@{
+            PackageManager  = $choice
+            Source          = 'user-decision'
+            DetectionReport = $report
+            ConfigPath      = $null
+        }
+    }
+
+    $src = if ($report.Status -eq 'Default') { 'default' } else { 'detected' }
 
     return [pscustomobject]@{
         PackageManager  = $report.PackageManager
@@ -99,6 +115,63 @@ function Resolve-PackageManager {
         DetectionReport = $report
         ConfigPath      = $null
     }
+}
+
+
+<#
+.SYNOPSIS
+    Turns an ambiguous detection report into a decision, or fails cleanly.
+
+.DESCRIPTION
+    Non-interactive (CI, scripted, -NonInteractive): throws a SetupException
+    carrying the report's AmbiguityCode so the caller can map it to a support
+    code. Interactive: presents the evidence and asks the operator to pick.
+    There is deliberately no automatic fallback.
+#>
+function Resolve-AmbiguousPackageManager {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject] $Report,
+        [Parameter(Mandatory=$true)][string] $ProjectRoot,
+        [Parameter()][switch] $NonInteractive
+    )
+
+    $code = if ($Report.AmbiguityCode) { $Report.AmbiguityCode } else { 'PYPROJECT_PM_AMBIGUOUS' }
+
+    if ($NonInteractive) {
+        throw (New-SetupException `
+            -Message ("Package manager cannot be determined for '{0}'. {1}. Re-run with -PackageManager uv|poetry, or make the project explicit ([tool.uv] / [tool.poetry])." -f $ProjectRoot, $Report.Reason) `
+            -ErrorCode $code `
+            -Step 'DETECT' `
+            -Context @{
+                ProjectRoot   = $ProjectRoot
+                Reason        = $Report.Reason
+                Candidates    = ($Report.Candidates -join ',')
+                HasUvLock     = $Report.HasUvLock
+                HasPoetryLock = $Report.HasPoetryLock
+            })
+    }
+
+    Write-Host ''
+    Write-Host 'Der Package Manager fuer dieses Projekt ist nicht eindeutig.' -ForegroundColor Yellow
+    Write-Host ("  Grund: {0}" -f $Report.Reason) -ForegroundColor DarkGray
+    Write-Host '  [1] uv'
+    Write-Host '  [2] poetry'
+
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $answer = Read-Host 'Auswahl (1/2)'
+        switch (([string]$answer).Trim().ToLowerInvariant()) {
+            '1'      { return 'uv' }
+            'uv'     { return 'uv' }
+            '2'      { return 'poetry' }
+            'poetry' { return 'poetry' }
+        }
+        Write-Host 'Bitte 1 oder 2 eingeben.' -ForegroundColor Yellow
+    }
+
+    throw (New-SetupException `
+        -Message 'No valid package-manager selection was made.' `
+        -ErrorCode $code -Step 'DETECT' -Context @{ ProjectRoot = $ProjectRoot })
 }
 
 
@@ -134,7 +207,9 @@ function Invoke-PmDetection {
     Merge-SetupConfig -ProjectRoot $Ctx.ProjectRoot -Ctx $Ctx
 
     # Resolve PM using the full priority chain.
-    $resolved              = Resolve-PackageManager -CliChoice $Ctx.PackageManager -ProjectRoot $Ctx.ProjectRoot
+    $nonInteractive = $false
+    if ($Ctx.ContainsKey('NonInteractive')) { $nonInteractive = [bool]$Ctx.NonInteractive }
+    $resolved              = Resolve-PackageManager -CliChoice $Ctx.PackageManager -ProjectRoot $Ctx.ProjectRoot -NonInteractive:$nonInteractive
     $Ctx.PackageManager    = $resolved.PackageManager
     $Ctx.PmSource          = $resolved.Source
     $Ctx.PmDetectionReport = $resolved.DetectionReport
@@ -163,6 +238,13 @@ function Invoke-PmDetection {
             Write-LogDetail -Key 'poetry_lock'     -Value $r.HasPoetryLock
             Write-LogDetail -Key 'selected'        -Value $Ctx.PackageManager
         }
+        'user-decision' {
+            $r = $resolved.DetectionReport
+            Write-LogDetail -Key 'source'     -Value 'ambiguous project - resolved by operator'
+            Write-LogDetail -Key 'ambiguity'  -Value $r.AmbiguityCode
+            Write-LogDetail -Key 'decided_by' -Value $r.Reason
+            Write-LogDetail -Key 'selected'   -Value $Ctx.PackageManager
+        }
         'default' {
             Write-LogDetail -Key 'source'   -Value 'no signal found in pyproject.toml or lock files'
             Write-LogDetail -Key 'selected' -Value $Ctx.PackageManager
@@ -172,4 +254,4 @@ function Invoke-PmDetection {
 }
 
 
-Export-ModuleMember -Function Resolve-PackageManager, Invoke-PmDetection
+Export-ModuleMember -Function Resolve-PackageManager, Invoke-PmDetection, Resolve-AmbiguousPackageManager

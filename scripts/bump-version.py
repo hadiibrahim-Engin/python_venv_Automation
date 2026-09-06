@@ -172,15 +172,15 @@ def determine_bump(messages: list[str]) -> BumpLevel:
 # ---------------------------------------------------------------------------
 
 
-def read_version() -> tuple[str, str]:
-    """Return (version_string, source_key) from pyproject.toml.
+def read_version(pyproject: Path = PYPROJECT) -> tuple[str, str]:
+    """Return (version_string, source_key) from *pyproject*.
 
     source_key is one of:
         'project'       — PEP 621 / uv  ([project].version)
         'tool.poetry'   — Poetry         ([tool.poetry].version)
     Raises SystemExit if no version can be found.
     """
-    with open(PYPROJECT, "rb") as fh:
+    with open(pyproject, "rb") as fh:
         data = tomllib.load(fh)
 
     # PEP 621 / uv style
@@ -192,7 +192,7 @@ def read_version() -> tuple[str, str]:
         return data["tool"]["poetry"]["version"], "tool.poetry"
 
     raise SystemExit(
-        f"No version found in {PYPROJECT}.\n"
+        f"No version found in {pyproject}.\n"
         "Expected [project].version (PEP 621/uv) or [tool.poetry].version."
     )
 
@@ -217,23 +217,107 @@ def bump_version(version: str, level: BumpLevel) -> str:
     raise ValueError(f"Invalid bump level: {level}")
 
 
-def write_version(new_version: str, source_key: str) -> None:
-    """Replace the version string in pyproject.toml, preserving all formatting."""
-    text = PYPROJECT.read_text(encoding="utf-8")
+# A table header:  [project]   /  [tool.poetry]   (optionally trailing comment)
+SECTION_RE = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$")
+# An array-of-tables header: [[tool.foo]] — never a version target, but it does
+# change which table subsequent keys belong to.
+ARRAY_SECTION_RE = re.compile(r"^\s*\[\[\s*([^\[\]]+?)\s*\]\]\s*(?:#.*)?$")
+# version = "X.Y.Z"   preserving indentation, quote style and trailing comment.
+VERSION_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*version\s*=\s*)(?P<quote>[\"'])(?P<value>[^\"']*)(?P=quote)(?P<suffix>.*)$"
+)
 
-    if source_key == "project":
-        # Match: version = "X.Y.Z" under [project] (not inside [tool.*])
-        pattern = r'(?m)^(version\s*=\s*")[^"]+(")'
-    else:
-        # Same pattern; there should be only one version = "..." line for poetry.
-        pattern = r'(?m)^(version\s*=\s*")[^"]+(")'
 
-    new_text, count = re.subn(pattern, rf'\g<1>{new_version}\g<2>', text, count=1)
+def _replace_version_in_section(text: str, new_version: str, section: str) -> tuple[str, int]:
+    """Replace ``version = "..."`` inside *section* only.
+
+    Walks the file line by line tracking the active TOML table, so a
+    ``version`` key belonging to ``[build-system]``, ``[tool.uv.sources.*]`` or
+    any other table is never touched. Comments, indentation, quote style and
+    line endings are preserved. Returns (new_text, replacement_count).
+    """
+    out: list[str] = []
+    current: str | None = None
+    count = 0
+
+    for raw_line in text.splitlines(keepends=True):
+        # Split the content from its line terminator so CRLF survives intact.
+        stripped = raw_line.rstrip("\r\n")
+        terminator = raw_line[len(stripped):]
+
+        array_match = ARRAY_SECTION_RE.match(stripped)
+        section_match = SECTION_RE.match(stripped)
+
+        if array_match:
+            current = None  # array-of-tables is never our target
+        elif section_match:
+            current = section_match.group(1).strip()
+        elif current == section and count == 0:
+            version_match = VERSION_LINE_RE.match(stripped)
+            if version_match:
+                stripped = (
+                    f"{version_match.group('prefix')}"
+                    f"{version_match.group('quote')}{new_version}{version_match.group('quote')}"
+                    f"{version_match.group('suffix')}"
+                )
+                count += 1
+
+        out.append(stripped + terminator)
+
+    return "".join(out), count
+
+
+def write_version(
+    new_version: str, source_key: str, pyproject: Path = PYPROJECT
+) -> None:
+    """Write *new_version* into the correct TOML table of *pyproject*.
+
+    Deliberately NOT a global regex replace: the previous implementation swapped
+    the first line-anchored ``version =`` in the file, which silently rewrote the
+    wrong table whenever another table declared a version first.
+
+    The result is re-parsed and verified before the file is replaced, so a patch
+    that would corrupt the TOML or land in the wrong table fails instead of
+    leaving a broken pyproject.toml behind.
+    """
+    # newline="" keeps CRLF intact: Path.read_text/write_text would silently
+    # normalise a Windows checkout to LF and produce a whole-file diff.
+    with open(pyproject, "r", encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    new_text, count = _replace_version_in_section(text, new_version, source_key)
+
     if count == 0:
         raise SystemExit(
-            f"Could not find 'version = \"...\"' in {PYPROJECT} to replace."
+            f'Could not find \'version = "..."\' inside [{source_key}] in {pyproject}.'
         )
-    PYPROJECT.write_text(new_text, encoding="utf-8")
+
+    # Validate before committing the change to disk.
+    try:
+        parsed = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"Refusing to write invalid TOML to {pyproject}: {exc}") from exc
+
+    written = _lookup(parsed, source_key)
+    if written != new_version:
+        raise SystemExit(
+            f"Version patch landed in the wrong place: [{source_key}].version is "
+            f"{written!r} after patching, expected {new_version!r}."
+        )
+
+    with open(pyproject, "w", encoding="utf-8", newline="") as fh:
+        fh.write(new_text)
+
+
+def _lookup(data: dict, source_key: str) -> str | None:
+    """Read ``<source_key>.version`` out of parsed TOML data."""
+    node: object = data
+    for part in source_key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    if not isinstance(node, dict):
+        return None
+    return node.get("version")
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +353,16 @@ def main() -> None:
         default=None,
         help="Override commit analysis and apply this bump type.",
     )
+    parser.add_argument(
+        "--pyproject",
+        type=Path,
+        default=PYPROJECT,
+        help="Path to pyproject.toml (defaults to the repository root).",
+    )
     args = parser.parse_args()
 
     # --- Read current version ---
-    current_version, source_key = read_version()
+    current_version, source_key = read_version(args.pyproject)
     print(f"Current version : {current_version}  (source: [{source_key}])")
 
     # --- Determine bump level ---
@@ -304,8 +394,8 @@ def main() -> None:
         sys.exit(0)
 
     # --- Write new version ---
-    write_version(new_version, source_key)
-    print(f"Written         : {PYPROJECT.relative_to(REPO_ROOT)}")
+    write_version(new_version, source_key, args.pyproject)
+    print(f"Written         : {args.pyproject}")
 
     # Expose the new version as a pipeline variable for downstream steps.
     set_pipeline_variable("NEW_VERSION", new_version)

@@ -139,12 +139,31 @@ function Invoke-LockSyncStep {
 }
 
 function Invoke-DependencyInstallStep {
+<#
+.SYNOPSIS
+    Brings the .venv to the project's desired dependency state.
+
+.DESCRIPTION
+    A plain setup run installs what the lock file already pins; it does NOT
+    re-resolve dependencies to the newest allowed versions. Upgrading is an
+    explicit, deliberate act:
+
+        (default)            -> Invoke-PmInstallDeps      lock-conform sync
+        -UpgradePackage x    -> Invoke-PmUpdateSelectedDeps  only x
+        -UpdateDependencies  -> Invoke-PmUpdateDeps       re-resolve everything
+        -PinExact            -> Invoke-PmInstallDeps      lock-conform sync
+
+    Before this split, every setup run ended in Invoke-PmUpdateDeps, so simply
+    preparing a workstation silently rewrote the lock file and pulled in new
+    upstream releases.
+#>
     [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')] param([Parameter(Mandatory=$true)][hashtable] $Ctx)
     if ($Ctx.SkipPoetryInstall) { return 'skipped' }
     if (-not $PSCmdlet.ShouldProcess($Ctx.VenvDir, 'Install/update project dependencies')) { return 'whatif' }
     if ($Ctx.PinExact) { Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev; return 'pin-exact' }
     if ($Ctx.UpgradePackages -and $Ctx.UpgradePackages.Count -gt 0) { Invoke-PmUpdateSelectedDeps -Ctx $Ctx -Packages $Ctx.UpgradePackages -IncludeDev $Ctx.IncludeDev; return 'selective-upgrade' }
-    Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev; 'upgrade-all'
+    if ($Ctx.UpdateDependencies) { Invoke-PmUpdateDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev; return 'upgrade-all' }
+    Invoke-PmInstallDeps -Ctx $Ctx -IncludeDev $Ctx.IncludeDev; 'sync-locked'
 }
 
 function Invoke-VenvPathStep {

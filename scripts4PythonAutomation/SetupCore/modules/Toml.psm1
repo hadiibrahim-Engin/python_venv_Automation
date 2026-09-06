@@ -124,28 +124,32 @@ function Get-ProjectMetadata {
     Runs the full package-manager detection and returns every signal found.
 
 .DESCRIPTION
-    Detection priority (first match wins):
+    PEP 621 `[project]` is TOOL-NEUTRAL: its presence says nothing about which
+    package manager owns the project. Detection therefore works on *strong*
+    signals only, and refuses to guess when the evidence is contradictory or
+    absent.
 
-      1. Build-system backend  - most definitive authorship signal.
-           build-backend = "poetry.core.masonry.api"  → poetry
+    Strong uv signals      : [tool.uv] / [tool.uv.*] section, uv.lock
+    Strong poetry signals  : build-backend = "poetry.core.masonry.api",
+                             [tool.poetry] / [tool.poetry.*] section, poetry.lock
 
-      2. Explicit tool sections in pyproject.toml.
-           [tool.uv] or [tool.uv.*]  present, no [tool.poetry.*] → uv
-           [tool.poetry] or [tool.poetry.*] present, no [tool.uv*] → poetry
-
-      3. PEP 621 [project] table without Poetry sections → uv.
-
-      4. Lock files - what was most recently USED.
-           uv.lock only    → uv
-           poetry.lock only → poetry
-           Both present    → the more recently written file wins.
-
-      5. No signal → poetry (conservative default).
+    Resolution:
+      1. Strong signals for BOTH managers      -> Ambiguous.
+         Lock-file mtime is deliberately NOT used as a tie-breaker: which file
+         was written last is an artifact of tooling order, not a statement of
+         intent, and silently picking one corrupts the project.
+      2. Strong signals for exactly one        -> that manager (Resolved).
+      3. No strong signals but [project] present -> Ambiguous (PEP 621 only).
+      4. Nothing at all                        -> poetry (Default).
 
 .OUTPUTS
     PSCustomObject with:
-        PackageManager    - 'uv' or 'poetry'
-        Reason            - Human-readable string naming the winning evidence
+        PackageManager    - 'uv' | 'poetry' | $null when Status is 'Ambiguous'
+        Status            - 'Resolved' | 'Ambiguous' | 'Default'
+        AmbiguityCode     - $null, 'PYPROJECT_PM_AMBIGUOUS' or
+                            'PYPROJECT_MULTIPLE_LOCKFILES'
+        Candidates        - managers still in play when Status is 'Ambiguous'
+        Reason            - human-readable string naming the winning evidence
         HasPoetryBackend  - build-backend = "poetry.core.masonry.api" found
         HasUvSection      - [tool.uv] or [tool.uv.*] section found
         HasPoetrySection  - [tool.poetry] or [tool.poetry.*] section found
@@ -174,56 +178,60 @@ function Get-PmDetectionReport {
             #   # [tool.uv.sources]  or  # build-backend = "poetry.core.masonry.api"
             $clean = Get-TomlClean -Raw $raw
 
-            $hasPoetryBackend  = $clean -match 'poetry\.core\.masonry\.api'
-            $hasUvSection      = $clean -match '(?m)^\s*\[tool\.uv[\].]'
-            $hasPoetrySection  = $clean -match '(?m)^\s*\[tool\.poetry[\].]'
-            $hasProjectSection = $clean -match '(?m)^\s*\[project\]'
+            $hasPoetryBackend  = [bool]($clean -match 'poetry\.core\.masonry\.api')
+            $hasUvSection      = [bool]($clean -match '(?m)^\s*\[tool\.uv[\].]')
+            $hasPoetrySection  = [bool]($clean -match '(?m)^\s*\[tool\.poetry[\].]')
+            $hasProjectSection = [bool]($clean -match '(?m)^\s*\[project\]')
         }
     }
 
-    # Mirror the detection priority chain.
-    $pm     = 'poetry'
-    $reason = 'no signal found - using default'
+    # --- Collect strong evidence per manager -------------------------------
+    $uvEvidence = @()
+    if ($hasUvSection) { $uvEvidence += '[tool.uv] section' }
+    if ($hasUvLock)    { $uvEvidence += 'uv.lock' }
 
-    if ($hasPoetryBackend) {
-        $pm     = 'poetry'
-        $reason = 'build-backend = "poetry.core.masonry.api" in [build-system]'
-    } elseif ($hasUvSection -and -not $hasPoetrySection) {
-        $pm     = 'uv'
-        $reason = '[tool.uv] section present, no [tool.poetry]'
-    } elseif ($hasPoetrySection -and -not $hasUvSection) {
-        $pm     = 'poetry'
-        $reason = '[tool.poetry] section present, no [tool.uv]'
-    } elseif ($hasUvSection -and $hasPoetrySection) {
-        $reason = '[tool.uv] and [tool.poetry] both present - checking lock files'
-    } elseif ($hasProjectSection -and -not $hasPoetrySection) {
-        $pm     = 'uv'
-        $reason = '[project] table (PEP 621) present, no [tool.poetry]'
+    $poetryEvidence = @()
+    if ($hasPoetryBackend) { $poetryEvidence += 'build-backend = "poetry.core.masonry.api"' }
+    if ($hasPoetrySection) { $poetryEvidence += '[tool.poetry] section' }
+    if ($hasPoetryLock)    { $poetryEvidence += 'poetry.lock' }
+
+    $pm            = $null
+    $status        = 'Resolved'
+    $ambiguityCode = $null
+    $candidates    = @()
+
+    if ($uvEvidence.Count -gt 0 -and $poetryEvidence.Count -gt 0) {
+        $status        = 'Ambiguous'
+        $candidates    = @('uv', 'poetry')
+        $ambiguityCode = if ($hasUvLock -and $hasPoetryLock) { 'PYPROJECT_MULTIPLE_LOCKFILES' } else { 'PYPROJECT_PM_AMBIGUOUS' }
+        $reason        = 'conflicting evidence - uv: {0}; poetry: {1}' -f ($uvEvidence -join ', '), ($poetryEvidence -join ', ')
     }
-
-    # Lock-file tiebreaker (reached for dual-mode or no TOML signal)
-    if ($reason -like '*lock files*' -or $reason -eq 'no signal found - using default') {
-        if ($hasPoetryLock -and -not $hasUvLock) {
-            $pm     = 'poetry'
-            $reason = 'poetry.lock present, no uv.lock'
-        } elseif ($hasUvLock -and -not $hasPoetryLock) {
-            $pm     = 'uv'
-            $reason = 'uv.lock present, no poetry.lock'
-        } elseif ($hasUvLock -and $hasPoetryLock) {
-            $uvTime     = (Get-Item -LiteralPath $uvLock).LastWriteTimeUtc
-            $poetryTime = (Get-Item -LiteralPath $poetryLock).LastWriteTimeUtc
-            if ($uvTime -ge $poetryTime) {
-                $pm     = 'uv'
-                $reason = 'uv.lock more recently written than poetry.lock'
-            } else {
-                $pm     = 'poetry'
-                $reason = 'poetry.lock more recently written than uv.lock'
-            }
-        }
+    elseif ($uvEvidence.Count -gt 0) {
+        $pm     = 'uv'
+        $reason = 'uv evidence only: {0}' -f ($uvEvidence -join ', ')
+    }
+    elseif ($poetryEvidence.Count -gt 0) {
+        $pm     = 'poetry'
+        $reason = 'poetry evidence only: {0}' -f ($poetryEvidence -join ', ')
+    }
+    elseif ($hasProjectSection) {
+        # PEP 621 alone is tool-neutral - refuse to guess.
+        $status        = 'Ambiguous'
+        $candidates    = @('uv', 'poetry')
+        $ambiguityCode = 'PYPROJECT_PM_AMBIGUOUS'
+        $reason        = '[project] (PEP 621) is tool-neutral and no [tool.uv]/[tool.poetry] or lock file is present'
+    }
+    else {
+        $pm     = 'poetry'
+        $status = 'Default'
+        $reason = 'no signal found - using default'
     }
 
     [pscustomobject]@{
         PackageManager    = $pm
+        Status            = $status
+        AmbiguityCode     = $ambiguityCode
+        Candidates        = $candidates
         Reason            = $reason
         HasPoetryBackend  = $hasPoetryBackend
         HasUvSection      = $hasUvSection
@@ -246,7 +254,13 @@ function Get-PmDetectionReport {
 #>
 function Get-PreferredPackageManager {
     param([Parameter(Mandatory=$true)][string] $ProjectRoot)
-    return (Get-PmDetectionReport -ProjectRoot $ProjectRoot).PackageManager
+    $report = Get-PmDetectionReport -ProjectRoot $ProjectRoot
+    if ($report.Status -eq 'Ambiguous') {
+        # Callers that only want a string cannot express "needs a decision";
+        # returning $null here would be silently coerced to a manager later.
+        throw ("Package manager is ambiguous for '{0}': {1}" -f $ProjectRoot, $report.Reason)
+    }
+    return $report.PackageManager
 }
 
 
