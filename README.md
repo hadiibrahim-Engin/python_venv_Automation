@@ -1,143 +1,306 @@
 # python_venv_Automation
 
-Windows-only PowerShell automation for creating, repairing, signing, and activating a Python virtual environment from a project root. The toolkit supports both `uv` and Poetry, can discover or validate a local Python interpreter, requires DigiCert Utility, and is designed to be safe to run repeatedly.
+Windows-focused PowerShell automation for creating, updating, validating, signing, and activating Python virtual environments. The toolkit supports **uv** and **Poetry**, discovers compatible Python interpreters, integrates DigiCert Authenticode signing, and is designed to be safe and repeatable for developer workstations and CI/CD.
 
-It is packaged as a distributable PowerShell module — **`PythonVenvAutomation`** — that exposes a single, simple global command (default name **`devsetup`**) with automatic self-updating. The original `scripts4PythonAutomation\setup-core.ps1` entry point still works for backward compatibility.
+The distributable module is `PythonVenvAutomation`; the recommended global command is `devsetup`. The legacy entry point `scripts4PythonAutomation\setup-core.ps1` remains available for backward compatibility.
 
-## Recommended usage
+## Quick start
 
-From PowerShell **or** CMD, in your project directory:
-
-```cmd
+```powershell
 devsetup
+devsetup update
+devsetup upgrade
+devsetup rebuild
+devsetup dry
 ```
 
-That runs the full setup pipeline against the current project. See [Command reference](#command-reference) for the rest.
-
-## First-time installation
-
-No administrator rights are required. The command installs into a user-local directory and adds it to your user `PATH`.
-
-**Preferred (enterprise) method — download then run:**
+Advanced parameters are forwarded after `--`:
 
 ```powershell
-Invoke-RestMethod https://REPLACE_WITH_COMPANY_TOOLS_URL/devsetup/install.ps1 -OutFile install-devsetup.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install-devsetup.ps1
-```
-
-**Convenience method (one-liner):**
-
-```powershell
-irm https://REPLACE_WITH_COMPANY_TOOLS_URL/devsetup/install.ps1 | iex
-```
-
-> The two-step download-and-run method is the **recommended** approach for enterprise environments — you can review `install-devsetup.ps1` before executing it. The `irm | iex` form is documented only as a developer convenience.
-
-**From CMD:**
-
-```cmd
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-RestMethod https://REPLACE_WITH_COMPANY_TOOLS_URL/devsetup/install.ps1 -OutFile install-devsetup.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File .\install-devsetup.ps1"
-```
-
-After installation, open a **new** PowerShell or CMD window and run `devsetup`.
-
-The user-facing install URL (`https://REPLACE_WITH_COMPANY_TOOLS_URL/devsetup/install.ps1`) is intended to be a **stable** address managed by IT. It can point at a GitHub Release asset, an Azure Pipelines artifact, or a static internal URL — and it stays stable even if the backend artifact store changes.
-
-## Command reference
-
-```cmd
-devsetup                 Run full setup (same as: devsetup setup)
-devsetup update          Refresh existing .venv without reinstalling tools
-devsetup upgrade         Refresh existing .venv and upgrade dependencies
-devsetup rebuild         Remove and recreate .venv
-devsetup dry             Print the planned setup without modifying files
-devsetup prod            Install production dependencies only
-devsetup list-python     Show/select available Python interpreters
-devsetup self-update     Update this automation command and module now
-devsetup help            Show help
-```
-
-Mapping to the engine:
-
-| Friendly command | Engine call |
-| --- | --- |
-| `devsetup` / `devsetup setup` | `Invoke-PythonVenvSetup` |
-| `devsetup update` | `Invoke-PythonVenvSetup -Mode update-venv` |
-| `devsetup upgrade` | `Invoke-PythonVenvSetup -Mode update-venv -UpdateDependencies` |
-| `devsetup rebuild` | `Invoke-PythonVenvSetup -ForceRecreateVenv` |
-| `devsetup dry` | `Invoke-PythonVenvSetup -DryRun` |
-| `devsetup prod` | `Invoke-PythonVenvSetup -ExcludeDev` |
-| `devsetup list-python` | `Invoke-PythonVenvSetup -ListMode` |
-| `devsetup self-update` | `Update-PythonVenvAutomation` |
-
-## Advanced usage
-
-Everything after `--` is forwarded verbatim to `Invoke-PythonVenvSetup`, so the full parameter surface stays available:
-
-```cmd
 devsetup -- -PackageManager uv -NonInteractive
 devsetup update -- -UpgradePackage requests
-devsetup dry -- -PackageManager poetry
+devsetup -- -SkipGitPull
+devsetup -- -LogLevel DEBUG
 ```
 
-Preserved engine options include: `-PackageManager auto|uv|poetry`, `-Mode setup|update-venv|venv-update|refresh-venv`, `-PythonExePath`, `-ListMode`, `-UpdateDependencies`, `-ExcludeDev`, `-DryRun`, `-NonInteractive`, `-ForceRecreateVenv`, `-DigiCertUtilityExe`, `-SkipPythonInstall`, `-AllowPythonInstall`, `-UnblockScripts`, `-ContinueOnPrecheckFailure`, `-UpgradePackage`, and `-PinExact`.
+## Requirements
 
-## Automatic updates
+- Windows
+- Windows PowerShell 5.1+ or `pwsh`
+- a supported Python declared by the project (the templates currently target Python 3.11/3.12)
+- DigiCert Utility for real setup/signing runs
+- `pyproject.toml` or another supported dependency declaration
 
-Every `devsetup` run first checks whether the installed `PythonVenvAutomation` module is current, **before** importing it:
+DigiCert is resolved in this order:
 
-- If a newer approved version exists, it updates automatically and then re-runs your command once.
-- You normally never need to run `devsetup self-update` — it is there for manual repair/update.
-- `devsetup --no-self-update` skips the check for a single invocation.
-- `devsetup --force-self-update` forces a check before running.
-- Offline users continue with their installed version when it is acceptable; the run fails clearly only when no acceptable local version exists.
-- Concurrent terminals are protected by an update lock so the module on disk is never corrupted.
+1. `-DigiCertUtilityExe`
+2. `DIGICERT_UTILITY_EXE`
+3. the centrally defined default installation path
 
-```cmd
-devsetup
-devsetup --no-self-update dry
-devsetup --force-self-update
-devsetup self-update
-```
-
-> `--no-self-update` / `--force-self-update` are **shim-level flags** consumed by the command itself — they are never forwarded to the engine. They are distinct from raw passthrough after `--`, so `devsetup update -- -UpgradePackage requests` still works.
-
-IT/admins control update behavior at install time:
-
-```powershell
-.\install.ps1 -AutoUpdatePolicy LatestStable
-.\install.ps1 -AutoUpdatePolicy MinimumRequired -RequiredVersion 1.2.0
-.\install.ps1 -AutoUpdatePolicy Pinned -RequiredVersion 1.2.0
-.\install.ps1 -DisableAutoUpdate
-```
-
-Policies: **LatestStable** (default — install/update to the newest stable), **MinimumRequired** (ensure at least `RequiredVersion`), **Pinned** (install/use exactly `RequiredVersion`), **Disabled** (skip auto-checks; manual `self-update` still works).
-
-Runtime configuration is stored under `%LOCALAPPDATA%\Company\PythonVenvAutomation\config.json` and is read by the command on every run.
-
-## Changing the command name
-
-The command name is defined in exactly one place:
+If the resolved executable does not exist, setup fails before mutating project state with:
 
 ```text
-PythonVenvAutomation/config/CommandName.ps1
+DigiCert Utility not found. Please install or set environment variable.
 ```
+
+## Safe Git synchronization
+
+Before environment setup, `Invoke-PythonVenvSetup` can safely synchronize the project repository.
+
+Default project configuration:
+
+```json
+{
+  "AutoGitPull": true,
+  "GitPullStrategy": "SkipIfDirty"
+}
+```
+
+The safety model is intentionally conservative:
+
+- remote state is refreshed with bounded `git fetch --prune`;
+- clean branches that are only behind use `git pull --ff-only`;
+- dirty repositories are skipped by default;
+- diverged branches are never auto-merged or auto-rebased;
+- `git clean` is never run automatically;
+- destructive reset is possible only with explicit `-ForceGitPull`;
+- Git mutation supports PowerShell `-WhatIf` / `-Confirm`.
+
+Detailed design: [Safe Git Synchronization](PythonVenvAutomation/docs/SAFE_GIT_SYNC.md).
+
+## Intelligent DigiCert signing
+
+Signing is **idempotent**. Every candidate executable/DLL is inspected with `Get-AuthenticodeSignature` before DigiCert is invoked.
+
+```text
+Valid signature              -> skip
+NotSigned                    -> sign
+HashMismatch / changed file  -> sign again
+Invalid signature            -> sign again
+```
+
+A normal update therefore does **not** re-sign every file in an existing `.venv`. Only new, changed, unsigned, or invalid binaries are sent to DigiCert. Existing valid vendor signatures are preserved.
+
+`devsetup update` also performs this intelligent signing scan after dependencies are refreshed, so newly installed command-line executables are signed without touching already valid files.
+
+Detailed design: [Intelligent DigiCert Signing](PythonVenvAutomation/docs/SMART_CODE_SIGNING.md).
+
+## Refactored setup architecture
+
+`Start-Setup` is no longer a single large orchestration function. The active architecture consists of:
+
+```text
+Start-Setup
+   |
+   +-- build setup context
+   +-- build named pipeline steps
+   |
+   v
+SetupPipeline.psm1
+   |
+   +-- PRECHECK
+   +-- METADATA
+   +-- PYTHON
+   +-- PM-RUNTIME
+   +-- PM-SIGN
+   +-- PM-CONFIG
+   +-- VENV-PREPARE
+   +-- VENV-VALIDATE
+   +-- LOCK
+   +-- DEPENDENCIES
+   +-- PROJECT-PTH / VSCODE / TCL
+   +-- SMART-SIGNING
+   +-- CLEANUP
+```
+
+Named actions live in `SetupSteps.psm1`. Pipeline timing, dry-run behavior, optional/mandatory failures, and conversion to structured errors are handled centrally by `SetupPipeline.psm1`.
+
+Architecture details: [Phase 2 Architecture](PythonVenvAutomation/docs/PHASE2_ARCHITECTURE.md).
+
+## Structured errors
+
+Pipeline failures are normalized to `SetupException`, which contains:
+
+```text
+Message
+ErrorCode
+Step
+Context
+```
+
+This makes console errors and CI failures attributable to a concrete setup stage instead of relying on generic `throw` text alone.
+
+Representative error codes include:
+
+```text
+DIGICERT_NOT_FOUND
+PRECHECK_FAILED
+PM_DETECTION_FAILED
+PYTHON_RESOLUTION_FAILED
+PM_RUNTIME_FAILED
+VENV_PREPARE_FAILED
+DEPENDENCY_INSTALL_FAILED
+VENV_SIGNING_FAILED
+VENV_UPDATE_FAILED
+```
+
+## Structured logging
+
+Every run receives a GUID correlation ID. Structured events are written as newline-delimited JSON to:
+
+```text
+%TEMP%\python-setup-log.json
+```
+
+Stable fields:
+
+```text
+Timestamp
+Level
+Step
+Message
+CorrelationId
+Module      (when available)
+Context     (when available)
+```
+
+Supported levels are `DEBUG`, `INFO`, `WARN`, and `ERROR`.
+
+Example project config:
+
+```json
+{
+  "LogLevel": "INFO"
+}
+```
+
+CLI override:
 
 ```powershell
-$Script:DevSetupCommandName = 'envctl'
+devsetup -- -LogLevel DEBUG
 ```
 
-After changing it, regenerate the shims:
+## Configuration reference
+
+Project-local defaults live in `.setup-config.json`. A complete example is committed as [.setup-config.example.json](.setup-config.example.json).
+
+Supported project keys:
+
+| Key | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `AutoGitPull` | boolean | `true` | Run safe Git synchronization before setup. |
+| `GitPullStrategy` | string | `SkipIfDirty` | `SkipIfDirty` or `ErrorIfDirty`. |
+| `LogLevel` | string | `INFO` | `DEBUG`, `INFO`, `WARN`, `ERROR`. |
+| `PackageManager` | string | `auto` | `auto`, `uv`, or `poetry`. |
+| `PinnedPoetryVersion` | string | empty | Optional Poetry runtime pin. |
+| `PinnedUvVersion` | string | empty | Optional uv runtime pin. |
+
+Machine-specific DigiCert paths and destructive Git force behavior are intentionally not stored in project configuration.
+
+Detailed reference: [Configuration Reference](PythonVenvAutomation/docs/CONFIGURATION_REFERENCE.md).
+
+## Config write failures
+
+Configuration persistence is fail-safe:
+
+- **interactive:** the user is explicitly asked whether setup may continue without saving;
+- **non-interactive / CI:** the write error is thrown and the pipeline fails.
+
+The tool no longer logs a config write error and silently continues in CI.
+
+## PowerShell `ShouldProcess`
+
+Mutating setup operations implement or are routed through functions implementing `SupportsShouldProcess`, including Git synchronization, configuration writes, signing, venv creation/removal/backup/restore, filesystem cleanup, project `.pth` writes, VS Code configuration, dependency updates, and setup pipeline actions.
+
+Preview a setup without mutation:
 
 ```powershell
-Install-DevSetupCommand -Force
+Invoke-PythonVenvSetup -WhatIf
 ```
 
-The generated command then becomes `envctl` (`envctl.ps1`, `envctl.cmd`), and the help text, installer output, and runtime config all use the new name automatically. No other code changes are required.
+or:
 
-## Backward compatibility
+```powershell
+devsetup dry
+```
 
-The original entry point still works exactly as before:
+Explicit destructive operations can be paired with `-Confirm`.
+
+## Update mode
+
+Use update mode when `.venv` already exists:
+
+```powershell
+devsetup update
+```
+
+The update path:
+
+1. validates the existing environment;
+2. detects the dependency system;
+3. refreshes dependencies with uv, Poetry, or pip;
+4. persists `.venv\Scripts` on PATH;
+5. scans Authenticode state;
+6. signs only new/changed/invalid binaries.
+
+It does not reinstall the package-manager runtime or blindly recreate the environment.
+
+## Testing
+
+Run the complete test suite locally:
+
+```powershell
+.\Run-Tests.ps1
+```
+
+The runner requires Pester 5+, produces NUnit and JaCoCo output, and enforces a **70% coverage gate on the refactored core logic**.
+
+Core test areas include:
+
+- safe Git synchronization;
+- configuration persistence failures;
+- uv/Poetry package-manager detection;
+- intelligent code signing;
+- setup pipeline ordering/error behavior;
+- structured logging;
+- PowerShell syntax parsing;
+- existing module/shim/build compatibility tests.
+
+GitHub Actions and Azure Pipelines both execute the Windows Pester/coverage validation before build/publish stages.
+
+## Repository layout
+
+```text
+PythonVenvAutomation/
+├─ Public/
+├─ Private/
+├─ config/
+├─ templates/
+└─ docs/
+
+scripts4PythonAutomation/
+├─ Setup-Core.psm1
+├─ setup-core.ps1
+└─ SetupCore/modules/
+   ├─ Constants.psm1
+   ├─ Errors.psm1
+   ├─ Logging.psm1
+   ├─ GitSync.psm1
+   ├─ SetupPipeline.psm1
+   ├─ SetupSteps.psm1
+   ├─ CodeSigning.psm1
+   ├─ Config.psm1
+   └─ ...
+
+tests/
+Run-Tests.ps1
+azure-pipelines.yml
+.github/workflows/publish.yml
+```
+
+## Installation and backward compatibility
+
+The module is still designed to be installed at user scope; no administrator rights are required for the command shim itself. Existing script calls remain supported:
 
 ```powershell
 .\scripts4PythonAutomation\setup-core.ps1
@@ -146,182 +309,36 @@ The original entry point still works exactly as before:
 .\scripts4PythonAutomation\setup-core.ps1 -ForceRecreateVenv
 ```
 
-It is now a thin wrapper that imports `PythonVenvAutomation` (falling back to the local repository copy if the module is not installed) and forwards to `Invoke-PythonVenvSetup`. `devsetup` is the recommended interface going forward.
-
-## Module layout
-
-```text
-PythonVenvAutomation/
-├─ PythonVenvAutomation.psd1      # manifest (ModuleVersion kept in sync with VERSION)
-├─ PythonVenvAutomation.psm1      # loader: config -> Private -> Public -> engine
-├─ Public/                        # 4 exported commands
-├─ Private/                       # helpers (command name, shim, config, version/update)
-├─ config/CommandName.ps1         # single source of truth for the command name
-├─ templates/                     # shim .ps1/.cmd templates + DevSetup.Bootstrap.ps1
-├─ bin/  docs/  engine/           # engine/ is bundled at build time
-VERSION                           # single source of truth for the module version
-install.ps1                       # standalone installer
-build/                            # Test.ps1 / Build.ps1 / Publish.ps1 / Update-Version.ps1
-azure-pipelines.yml               # Validate / Build / Publish (Azure DevOps)
-.github/workflows/publish.yml     # validate / build / publish (GitHub)
-```
-
-## Public commands (programmatic use)
+Programmatic entry point:
 
 ```powershell
 Import-Module PythonVenvAutomation
-
-Invoke-PythonVenvSetup [-Mode ...] [-DryRun] [-ForceRecreateVenv] ...   # wraps Start-Setup
-Install-DevSetupCommand [-Force] [-AutoUpdatePolicy ...] [-DisableAutoUpdate]
-Update-PythonVenvAutomation                                              # manual self-update
-Get-PythonVenvSetupInfo                                                  # diagnostics
+Invoke-PythonVenvSetup
 ```
 
-## Requirements
+## Versioning and publishing
 
-- Windows
-- PowerShell 5.1 or newer, or `pwsh` (the command prefers `pwsh`, falls back to `powershell.exe`)
-- Python `>=3.11` and `<3.13`
-- DigiCert Utility for a real setup run
-- A project root that contains `pyproject.toml`
+`VERSION` remains the module version source of truth. `build\Update-Version.ps1` keeps the module manifest aligned, and the build validates that they match.
 
-The script aborts immediately when run outside Windows. DigiCert is treated as required infrastructure: if DigiCert Utility is missing on Windows, prechecks abort before setup mutates the environment.
+Version tags (`v1.2.3`) are used for release publishing. GitHub Actions and Azure Pipelines separate validation, build, and publish stages; credentials are supplied through secret variables rather than committed configuration.
 
-## Updating an existing venv only
+## Documentation
 
-Use update mode when `.venv` already exists and you only want to refresh dependencies:
-
-```cmd
-devsetup update
-```
-
-or, via the legacy entry point:
-
-```powershell
-.\scripts4PythonAutomation\setup-core.ps1 -Mode update-venv
-```
-
-This validates the existing `.venv`, detects the dependency system, and runs the appropriate refresh command without reinstalling Python, Poetry, uv, recreating `.venv`, writing editor settings, copying DLLs, or code-signing executables.
-
-- uv projects run `uv sync` by default.
-- Poetry projects run `poetry install` by default.
-- `requirements.txt` projects run `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
-- `devsetup upgrade` (or `-Mode update-venv -UpdateDependencies`) intentionally upgrades all dependencies.
-- `devsetup update -- -UpgradePackage "name"` refreshes selected uv/Poetry packages only.
-
-If the required dependency CLI is missing, update mode stops with a clear message instead of bootstrapping tools. Run the full setup once to install missing tooling.
-
-## Activation
-
-After setup completes, activate the environment in the current shell by dot-sourcing the activation script:
-
-```powershell
-. .\scripts4PythonAutomation\activate-venv.ps1
-```
-
-Do not run that script directly — it is meant to modify the current shell session, which only works when it is dot-sourced.
-
-## How the pipeline works
-
-The setup flow is a fixed pipeline inside `Start-Setup` (unchanged by this distribution layer):
-
-1. Require a Windows host.
-2. Detect the package manager from CLI overrides, cached config, `pyproject.toml`, or lock files.
-3. Run prechecks (including the required DigiCert check).
-4. Parse project metadata from `pyproject.toml`.
-5. Resolve a compatible Python interpreter.
-6. Ensure the package-manager runtime exists.
-7. Configure package-manager defaults and persist installed tool directories on PATH.
-8. Create or refresh `.venv`; validate and copy runtime assets. An existing `.venv` that fails the Python-compatibility check (missing/broken interpreter, or no longer satisfying `requires-python`) is backed up and recreated automatically here — `-ForceRecreateVenv` / `devsetup rebuild` is only needed to force a rebuild of an otherwise-healthy `.venv`.
-9. Sync the lock file or re-resolve dependencies, then install.
-10. Write project wiring (`.pth`, VS Code settings), copy Tcl runtime, and code-sign executables.
-
-The flowchart in [scripts4PythonAutomation/Flow.md](scripts4PythonAutomation/Flow.md) contains a detailed Mermaid version. For a full command-by-command reference, run [scripts4PythonAutomation/Get-SetupHelp.ps1](scripts4PythonAutomation/Get-SetupHelp.ps1).
-
-## pyproject templates
-
-```powershell
-Copy-Item .\templates\pyproject.uv.toml .\pyproject.toml
-Copy-Item .\templates\pyproject.poetry.toml .\pyproject.toml
-Remove-Item .setup-config.json -ErrorAction SilentlyContinue
-devsetup dry -- -PackageManager auto
-```
-
-The uv template uses `[project]` plus `[tool.uv]` and no Poetry sections; the Poetry template uses `[tool.poetry]` plus `poetry.core.masonry.api` and no uv sections. That keeps auto-detection deterministic.
-
-## Versioning and releases
-
-- The module version lives in one place: the repo-root `VERSION` file. `build\Update-Version.ps1` keeps the manifest in sync, and `build\Build.ps1` fails the build if they ever differ.
-- Releases are cut from semantic version tags: `v1.0.0`, `v1.0.1`, `v1.1.0`, `v2.0.0`.
-- Pull requests and normal branches run validation only; version tags (`v*`) run validate + build + publish.
-
-Build scripts:
-
-```powershell
-.\build\Test.ps1            # syntax + manifest + import + command-name + Pester (mocked; no real pipeline)
-.\build\Build.ps1           # clean, stage, bundle engine, validate, package into artifacts/
-.\build\Publish.ps1 -RepositoryName <name> -RepositoryUri <uri> [-ApiKey <key>] [-Prerelease]
-.\build\Update-Version.ps1 -Version 1.2.0 [-ValidateGitTag v1.2.0]
-```
-
-## Azure DevOps publishing
-
-`azure-pipelines.yml` defines three stages — **Validate**, **Build**, **Publish**:
-
-- Pull requests and branch pushes run **Validate** (and **Build**).
-- Version tags `v*` additionally run **Publish** to an Azure Artifacts NuGet feed.
-
-Adapt by editing only the variables at the top:
-
-```yaml
-variables:
-  PSRepositoryName: 'CompanyPS'
-  PSRepositoryUri: 'https://pkgs.dev.azure.com/REPLACE_ORG/REPLACE_PROJECT/_packaging/REPLACE_FEED/nuget/v3/index.json'
-```
-
-The feed API key must be provided as a **secure pipeline variable** named `NUGET_API_KEY` (or a variable group / library). It is mapped into the publish step's environment and is never printed.
-
-## GitHub publishing
-
-`.github/workflows/publish.yml` defines **validate**, **build**, and **publish** jobs:
-
-- Pull requests run **validate**; pushes to `main` run **validate + build**.
-- Version tags `v*` additionally **publish** the module to GitHub Packages and attach `install.ps1` to the GitHub Release.
-
-Adapt by editing only the environment block at the top:
-
-```yaml
-env:
-  PS_REPOSITORY_NAME: GitHubPackages
-  PS_REPOSITORY_URI: https://nuget.pkg.github.com/REPLACE_OWNER/index.json
-```
-
-Publishing authenticates with `GITHUB_TOKEN` (swap for a PAT secret if your org requires one). Tokens are passed through environment secrets and are never printed.
-
-## Artifact feed configuration
-
-The package backend is decoupled from the user-facing install URL and from the core module code. It can be:
-
-- an Azure Artifacts NuGet feed,
-- a GitHub Packages NuGet registry,
-- any internal NuGet-compatible feed, or
-- an internal file-based PowerShell repository.
-
-Switching backends is done by changing configuration values (`RepositoryName` / `RepositoryUri` in `install.ps1`, runtime config, and the pipeline variables) — **not** by editing module code.
-
-## Security
-
-- No credentials or tokens are committed; pipelines use Azure secure variables / GitHub Actions secrets.
-- Publishing fails closed when authentication is unavailable, and never echoes the API key.
-- Installs use `CurrentUser` scope and never require admin rights.
-- The two-step download-and-run installer is the recommended enterprise method; `irm | iex` is documented only as convenience.
+- [Documentation index](PythonVenvAutomation/docs/README.md)
+- [Safe Git Synchronization](PythonVenvAutomation/docs/SAFE_GIT_SYNC.md)
+- [Intelligent DigiCert Signing](PythonVenvAutomation/docs/SMART_CODE_SIGNING.md)
+- [Phase 2 Architecture](PythonVenvAutomation/docs/PHASE2_ARCHITECTURE.md)
+- [Configuration Reference](PythonVenvAutomation/docs/CONFIGURATION_REFERENCE.md)
+- [Security Model and Troubleshooting](PythonVenvAutomation/docs/SECURITY_AND_TROUBLESHOOTING.md)
+- [Migration Guide](PythonVenvAutomation/docs/MIGRATION_GUIDE.md)
+- [Detailed setup flow](scripts4PythonAutomation/Flow.md)
 
 ## Troubleshooting
 
-- `devsetup help` prints the full command list. `Get-PythonVenvSetupInfo` reports installed version, shim paths, and the effective runtime config.
-- If the legacy script is launched from the VS Code integrated terminal, it detaches into a plain PowerShell subprocess to avoid opening every module file in the editor.
-- If setup says it is Windows-only, run it from Windows PowerShell or `pwsh` on Windows.
-- If activation does not affect the current shell, use the dot-sourced form: `. .\scripts4PythonAutomation\activate-venv.ps1`.
-- If DigiCert is missing, install DigiCert Utility or pass `-DigiCertUtilityExe`. Setup aborts before making changes.
-- If PowerShell reports blocked scripts, run with `-UnblockScripts` once, then rerun normally.
-- If the environment is corrupted, use `devsetup rebuild` to recreate it cleanly.
+Start with [Security Model and Troubleshooting](PythonVenvAutomation/docs/SECURITY_AND_TROUBLESHOOTING.md). Common cases:
+
+- `DIGICERT_NOT_FOUND`: install DigiCert Utility or set `DIGICERT_UTILITY_EXE`;
+- Git `SkippedDirty`: commit/stash local changes or explicitly skip Git sync;
+- Git `Diverged`: resolve the branch manually; automation intentionally does not merge;
+- config persistence failure: check filesystem permissions/disk space;
+- update-mode signing appears active: the scan is expected, but valid binaries are skipped and only `NewlySigned` targets reach DigiCert.
