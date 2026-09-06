@@ -28,6 +28,7 @@ $config.TestResult.OutputFormat = 'NUnitXml'
 
 if (-not $NoCoverage) {
     $config.CodeCoverage.Enabled = $true
+    $config.CodeCoverage.CoveragePercentTarget = $MinimumCoverage
 
     # Coverage gate intentionally targets deterministic core logic. Native/OS
     # integration modules such as GitSync, CodeSigning and SetupSteps are tested
@@ -46,8 +47,11 @@ if (-not $NoCoverage) {
 }
 
 $result = Invoke-Pester -Configuration $config
-if ($result.FailedCount -gt 0) {
-    throw ("Pester failed: {0} test(s) failed." -f $result.FailedCount)
+
+$failedContainers = if ($result.PSObject.Properties.Name -contains 'FailedContainersCount') { [int]$result.FailedContainersCount } else { 0 }
+$failedBlocks = if ($result.PSObject.Properties.Name -contains 'FailedBlocksCount') { [int]$result.FailedBlocksCount } else { 0 }
+if ($result.FailedCount -gt 0 -or $failedContainers -gt 0 -or $failedBlocks -gt 0) {
+    throw ("Pester failed: tests={0}, containers={1}, blocks={2}." -f $result.FailedCount, $failedContainers, $failedBlocks)
 }
 
 if (-not $NoCoverage -and $result.CodeCoverage) {
@@ -59,3 +63,8 @@ if (-not $NoCoverage -and $result.CodeCoverage) {
 }
 
 Write-Host ("All tests passed. Total={0}; Passed={1}; Failed={2}" -f $result.TotalCount, $result.PassedCount, $result.FailedCount) -ForegroundColor Green
+
+# Invoke-Pester can leave a non-zero native process exit code even when
+# Run.Exit is disabled. Normalize success for CI after our explicit checks.
+$global:LASTEXITCODE = 0
+exit 0
