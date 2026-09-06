@@ -1,0 +1,9 @@
+{
+  "AutoGitPull": true,
+  "GitPullStrategy": "SkipIfDirty",
+  "LogLevel": "INFO",
+  "PackageManager": "auto",
+  "PinnedPoetryVersion": "",
+  "PinnedUvVersion": "",
+  "_comment": "Project-local defaults. Destructive Git force operations and machine-specific DigiCert paths are intentionally CLI/environment only."
+}
