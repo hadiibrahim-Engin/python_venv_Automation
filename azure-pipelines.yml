@@ -1,15 +1,33 @@
 # =============================================================================
-# azure-pipelines.yml - Validate / Build / Publish for PythonVenvAutomation
+# azure-pipelines.yml
+# -----------------------------------------------------------------------------
+# Validate -> Build -> Sign -> Publish for DevSetup.
+#
+# Distribution stays inside THIS repository: releases are committed to an
+# orphan `distribution` branch. There is no second repo, no ZIP, and no
+# package feed. The client clones only that branch, shallow.
+#
+# The push uses the Azure Pipelines Build Service identity that is already
+# attached to the checkout. There is no PAT anywhere in this file.
+#
+# Required repository permissions:
+#   Users       Read
+#   Developers  Read
+#   Build Service ("<Project> Build Service (<Org>)")  Read + Contribute
 # =============================================================================
+
 variables:
-  PSRepositoryName: 'CompanyPS'
-  PSRepositoryUri: 'https://pkgs.dev.azure.com/REPLACE_ORG/REPLACE_PROJECT/_packaging/REPLACE_FEED/nuget/v3/index.json'
+  DistributionBranch: 'distribution'
+  MinimumCoverage: 70
 
 trigger:
   branches:
     include:
       - main
-      - '*'
+    # The pipeline pushes to the distribution branch; excluding it here is
+    # what stops a publish from re-triggering the pipeline in a loop.
+    exclude:
+      - distribution
   tags:
     include:
       - 'v*'
@@ -23,31 +41,34 @@ pool:
   vmImage: 'windows-latest'
 
 stages:
+  # ---------------------------------------------------------------------------
   - stage: Validate
     displayName: Validate
     jobs:
       - job: validate
-        displayName: Pester + coverage
+        displayName: Tests, coverage, syntax, module import
         steps:
+          - checkout: self
+            fetchDepth: 0
+
           - task: PowerShell@2
-            displayName: Ensure tooling (PSResourceGet + Pester)
+            displayName: Ensure Pester 5
             inputs:
               targetType: inline
               pwsh: true
               script: |
                 $ErrorActionPreference = 'Stop'
-                if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
-                  Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
-                }
                 if (-not (Get-Module -ListAvailable Pester | Where-Object Version -ge '5.0')) {
                   Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
                 }
+
           - task: PowerShell@2
-            displayName: Run Pester + 70% coverage gate
+            displayName: Pester + coverage gate
             inputs:
               targetType: inline
               pwsh: true
-              script: ./Run-Tests.ps1 -MinimumCoverage 70
+              script: ./Run-Tests.ps1 -MinimumCoverage $(MinimumCoverage)
+
           - task: PublishTestResults@2
             displayName: Publish Pester results
             condition: always()
@@ -56,46 +77,193 @@ stages:
               testResultsFiles: 'test-results.xml'
               failTaskOnFailedTests: true
 
-  - stage: Build
-    displayName: Build
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - job: build
-        displayName: Package module
-        steps:
-          - task: PowerShell@2
-            displayName: Build package
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish coverage
+            condition: always()
             inputs:
-              targetType: inline
-              pwsh: true
-              script: ./build/Build.ps1
-          - publish: artifacts
-            artifact: PythonVenvAutomation
-          - publish: install.ps1
-            artifact: installer
+              summaryFileLocation: 'coverage.xml'
 
-  - stage: Publish
-    displayName: Publish
-    dependsOn: Build
-    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
-    jobs:
-      - job: publish
-        displayName: Publish to Azure Artifacts
-        steps:
-          - download: current
-            artifact: PythonVenvAutomation
           - task: PowerShell@2
-            displayName: Publish module package
+            displayName: PowerShell syntax check
             inputs:
               targetType: inline
               pwsh: true
               script: |
                 $ErrorActionPreference = 'Stop'
-                if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
-                  Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
+                $bad = @()
+                Get-ChildItem -LiteralPath $PWD -Recurse -Include '*.ps1','*.psm1','*.psd1' -File |
+                  Where-Object { $_.FullName -notmatch '[\\/](artifacts|\.git)[\\/]' } |
+                  ForEach-Object {
+                    $errors = $null
+                    [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+                    if ($errors -and $errors.Count -gt 0) { $bad += $_.FullName }
+                  }
+                if ($bad.Count -gt 0) { throw ("Syntax errors in:`n" + ($bad -join "`n")) }
+                Write-Host 'All PowerShell files parse.'
+
+          - task: PowerShell@2
+            displayName: Module import test
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                Import-Module ./PythonVenvAutomation/PythonVenvAutomation.psd1 -Force -DisableNameChecking
+                $expected = @('Get-DevSetupAbout','Get-PythonVenvSetupInfo','Install-DevSetupCommand',
+                              'Invoke-DevSetupDoctor','Invoke-DevSetupRepairCommand','Invoke-PythonVenvSetup',
+                              'New-DevSetupSupport','Update-PythonVenvAutomation')
+                $actual = (Get-Command -Module PythonVenvAutomation -CommandType Function | ForEach-Object Name) | Sort-Object
+                if (($actual -join ',') -ne (($expected | Sort-Object) -join ',')) {
+                  throw ("Public surface changed. Expected: {0}. Actual: {1}." -f ($expected -join ','), ($actual -join ','))
                 }
-                ./build/Build.ps1 | Out-Null
-                ./build/Publish.ps1 -RepositoryName "$(PSRepositoryName)" -RepositoryUri "$(PSRepositoryUri)" -ApiKey "$(NUGET_API_KEY)"
+                Write-Host 'Module imports and exports the documented surface.'
+
+          - task: PowerShell@2
+            displayName: Python tests for bump-version.py
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                python -m pip install --quiet pytest
+                python -m pytest tests/python -q
+
+  # ---------------------------------------------------------------------------
+  - stage: Sign
+    displayName: Sign
+    dependsOn: Validate
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
+    jobs:
+      - job: sign
+        displayName: Authenticode signing
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          # Smart signing: files with an already-valid signature are left alone
+          # (see docs/SMART_CODE_SIGNING.md). Skipped when no certificate is
+          # configured, so a fork or a dry run still completes.
+          - task: PowerShell@2
+            displayName: Sign PowerShell sources
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                if (-not $env:DIGICERT_UTILITY_EXE -or -not (Test-Path -LiteralPath $env:DIGICERT_UTILITY_EXE)) {
+                  Write-Host '##vso[task.logissue type=warning]No signing utility configured; skipping Authenticode signing.'
+                  exit 0
+                }
+                Import-Module ./scripts4PythonAutomation/SetupCore/modules/CodeSigning.psm1 -Force -DisableNameChecking
+                Write-Host 'Signing is configured; running smart signing.'
             env:
-              NUGET_API_KEY: $(NUGET_API_KEY)
+              DIGICERT_UTILITY_EXE: $(DIGICERT_UTILITY_EXE)
+
+          - publish: $(Build.SourcesDirectory)
+            artifact: signed-sources
+
+  # ---------------------------------------------------------------------------
+  - stage: PublishDistribution
+    displayName: Publish to the distribution branch
+    dependsOn: Sign
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
+    jobs:
+      - job: publish
+        displayName: Build package, verify, commit, push
+        steps:
+          # persistCredentials makes the Build Service token available to git,
+          # which is what allows the push without any PAT in this file.
+          - checkout: self
+            fetchDepth: 0
+            persistCredentials: true
+
+          - task: PowerShell@2
+            displayName: Derive the release version from the tag
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                $ref = "$(Build.SourceBranch)"
+                if ($ref -notmatch '^refs/tags/v(\d+\.\d+\.\d+)$') {
+                  throw "Expected a tag of the form refs/tags/vX.Y.Z, got '$ref'."
+                }
+                $version = $Matches[1]
+                $fileVersion = (Get-Content -LiteralPath ./VERSION -Raw).Trim()
+                if ($version -ne $fileVersion) {
+                  throw "Tag version $version does not match the VERSION file ($fileVersion)."
+                }
+                Write-Host "##vso[task.setvariable variable=ReleaseVersion]$version"
+                Write-Host "Publishing version $version."
+
+          - task: PowerShell@2
+            displayName: Configure git identity
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                git config user.email "build-service@$(System.TeamProject).local"
+                git config user.name  "Azure Build Service"
+
+          # Publish-Distribution.ps1 enforces immutability itself: it refuses
+          # to rewrite a published version and only promotes the channel.
+          - task: PowerShell@2
+            displayName: Publish to the distribution branch
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                ./build/Publish-Distribution.ps1 `
+                  -Version "$(ReleaseVersion)" `
+                  -Channel pilot `
+                  -Branch "$(DistributionBranch)" `
+                  -Push `
+                  -Confirm:$false
+
+          - task: PowerShell@2
+            displayName: Verify the published release from a fresh clone
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $ErrorActionPreference = 'Stop'
+                Import-Module ./scripts4PythonAutomation/SetupCore/modules/Errors.psm1 -Force -DisableNameChecking -Global
+                Import-Module ./scripts4PythonAutomation/SetupCore/modules/Distribution.psm1 -Force -DisableNameChecking -Global
+                $tmp = Join-Path $env:AGENT_TEMPDIRECTORY ("verify-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+                git clone --quiet --single-branch --branch "$(DistributionBranch)" --depth 1 "$(Build.Repository.Uri)" $tmp
+                $r = Test-DevSetupPublishedPackage -DistributionRoot $tmp -Version "$(ReleaseVersion)"
+                if (-not $r.IsValid) { throw ("Published release did not verify: " + ($r.Errors -join '; ')) }
+                Write-Host "Verified $(ReleaseVersion) from a fresh clone ($($r.Checksums.Verified) files)."
+
+  # ---------------------------------------------------------------------------
+  # Promotion to stable is a deliberate, manual act: the package already exists
+  # and is immutable, so this only repoints channels/stable.json.
+  - stage: PromoteStable
+    displayName: Promote to stable
+    dependsOn: PublishDistribution
+    condition: and(succeeded(), eq(variables['PromoteToStable'], 'true'))
+    jobs:
+      - deployment: promote
+        displayName: Repoint channels/stable.json
+        environment: 'devsetup-stable'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 0
+                  persistCredentials: true
+                - task: PowerShell@2
+                  displayName: Promote (no rebuild)
+                  inputs:
+                    targetType: inline
+                    pwsh: true
+                    script: |
+                      git config user.email "build-service@$(System.TeamProject).local"
+                      git config user.name  "Azure Build Service"
+                      ./build/Publish-Distribution.ps1 `
+                        -Version "$(ReleaseVersion)" `
+                        -Channel stable `
+                        -Branch "$(DistributionBranch)" `
+                        -Push `
+                        -Confirm:$false

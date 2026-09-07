@@ -70,10 +70,36 @@ Describe 'Publish.ps1 is backend-agnostic' {
 }
 
 Describe 'No committed secrets' {
-    It 'pipelines reference secret variables, not literal tokens' {
-        $azure = Get-Content -LiteralPath (Join-Path $RepoRoot 'azure-pipelines.yml') -Raw
-        $gh    = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\publish.yml') -Raw
-        $azure | Should -Match 'NUGET_API_KEY'
-        $gh    | Should -Match 'secrets\.GITHUB_TOKEN'
+    BeforeAll {
+        $script:AzureYaml = Get-Content -LiteralPath (Join-Path $RepoRoot 'azure-pipelines.yml') -Raw
+        $script:GhYaml    = Get-Content -LiteralPath (Join-Path $RepoRoot '.github/workflows/publish.yml') -Raw
+    }
+
+    It 'the Azure pipeline contains no token literals' {
+        foreach ($pattern in 'personalAccessToken', 'ghp_[A-Za-z0-9]{16,}', 'password\s*[:=]\s*\S', ':\S+@dev\.azure\.com') {
+            $script:AzureYaml | Should -Not -Match $pattern
+        }
+    }
+
+    It 'the GitHub workflow contains no token literals' {
+        foreach ($pattern in 'personalAccessToken', 'ghp_[A-Za-z0-9]{16,}', ':\S+@github\.com') {
+            $script:GhYaml | Should -Not -Match $pattern
+        }
+    }
+
+    It 'pushes with the Build Service identity rather than a PAT' {
+        # persistCredentials hands git the pipeline identity, which is what
+        # makes a PAT unnecessary for the distribution push.
+        $script:AzureYaml | Should -Match 'persistCredentials:\s*true'
+    }
+
+    It 'excludes the distribution branch from its own trigger' {
+        # Without this, publishing would re-trigger the pipeline in a loop.
+        $script:AzureYaml | Should -Match '(?s)trigger:.*exclude:.*distribution'
+    }
+
+    It 'publishes to the distribution branch, not to a package feed' {
+        $script:AzureYaml | Should -Match 'Publish-Distribution\.ps1'
+        $script:AzureYaml | Should -Not -Match 'nuget/v3/index\.json'
     }
 }

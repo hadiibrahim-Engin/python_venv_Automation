@@ -36,7 +36,7 @@ Describe 'Public command surface' {
         Get-Command $_ -Module $ModuleName -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
     }
 
-    It 'does not export private helper <_>' -ForEach @('Get-DevSetupCommandName', 'New-DevSetupShim', 'Get-DevSetupRuntimeConfig', 'Test-PythonVenvAutomationVersion', 'Update-PythonVenvAutomationIfNeeded', 'Assert-DevSetupEngine') {
+    It 'does not export private helper <_>' -ForEach @('Get-DevSetupCommandName', 'New-DevSetupShim', 'Get-DevSetupRuntimeConfig', 'Test-PythonVenvAutomationVersion', 'Update-PythonVenvAutomationIfNeeded', 'Assert-DevSetupEngine', 'Get-DevSetupInstallInfo') {
         Get-Command $_ -Module $ModuleName -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
@@ -84,5 +84,37 @@ Describe 'Backward-compatible setup-core.ps1 wrapper' {
         $text = Get-Content -LiteralPath (Join-Path $RepoRoot 'scripts4PythonAutomation\setup-core.ps1') -Raw
         $text | Should -Match 'Invoke-PythonVenvSetup'
         $text | Should -Match 'Import-Module PythonVenvAutomation'
+    }
+}
+
+Describe 'Get-DevSetupInstallInfo' {
+    It 'derives version and paths from a managed installation layout' {
+        $root = Join-Path $TestDrive 'Company/DevSetup'
+        $moduleRoot = Join-Path $root 'versions/1.9.0/PythonVenvAutomation'
+        New-Item -ItemType Directory -Path $moduleRoot -Force | Out-Null
+
+        $info = InModuleScope PythonVenvAutomation -Parameters @{ mr = $moduleRoot } {
+            param($mr) Get-DevSetupInstallInfo -ModuleRoot $mr
+        }
+        $info.IsManaged | Should -BeTrue
+        $info.Version | Should -Be '1.9.0'
+        $info.InstallRoot | Should -Be $root
+        $info.BinDirectory | Should -Be (Join-Path $root 'bin')
+        $info.ConfigPath | Should -Be (Join-Path $root 'config.json')
+    }
+
+    It 'reports IsManaged false for a source checkout' {
+        $info = InModuleScope PythonVenvAutomation -Parameters @{ mr = (Join-Path $TestDrive 'repo/PythonVenvAutomation') } {
+            param($mr) Get-DevSetupInstallInfo -ModuleRoot $mr
+        }
+        $info.IsManaged | Should -BeFalse
+        $info.Version | Should -BeNullOrEmpty
+    }
+
+    It 'reports IsManaged false when the parent is not named versions' {
+        $info = InModuleScope PythonVenvAutomation -Parameters @{ mr = (Join-Path $TestDrive 'x/releases/1.0.0/PythonVenvAutomation') } {
+            param($mr) Get-DevSetupInstallInfo -ModuleRoot $mr
+        }
+        $info.IsManaged | Should -BeFalse
     }
 }

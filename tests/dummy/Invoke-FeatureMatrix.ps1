@@ -574,6 +574,140 @@ Test-Feature -Name 'user-facing error hides technical detail' -Expected 'True' -
 }
 
 # ---------------------------------------------------------------------------
+# 9c. Distribution and self-update (Parts A / B / D / E / F / G / AB)
+# ---------------------------------------------------------------------------
+Set-Group 'Distribution round trip (Parts A-H, AB)'
+
+$distRoot = Join-Path $Root 'dist'
+if (Test-Path -LiteralPath $distRoot) { Remove-Item -LiteralPath $distRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+
+function Invoke-MatrixGit {
+    param([string] $Dir, [string[]] $Arguments)
+    $all = @('-C', $Dir, '-c', 'user.email=matrix@example.invalid', '-c', 'user.name=Matrix',
+             '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main') + $Arguments
+    $out = & git @all 2>&1
+    if ($LASTEXITCODE -ne 0) { throw ("git {0} failed: {1}" -f ($Arguments -join ' '), ($out -join "`n")) }
+    return $out
+}
+
+# A local bare repository stands in for Azure DevOps: same git transport,
+# no network and no credentials.
+$origin = Join-Path $distRoot 'origin.git'
+New-Item -ItemType Directory -Path $origin -Force | Out-Null
+Invoke-MatrixGit -Dir $origin -Arguments @('init', '--bare', '--initial-branch=main', '--quiet') | Out-Null
+
+$publisher = Join-Path $distRoot 'publisher'
+New-Item -ItemType Directory -Path $publisher -Force | Out-Null
+Invoke-MatrixGit -Dir $publisher -Arguments @('init', '--initial-branch=distribution', '--quiet') | Out-Null
+Invoke-MatrixGit -Dir $publisher -Arguments @('remote', 'add', 'origin', $origin) | Out-Null
+
+$payload = @((Join-Path $RepoRoot 'PythonVenvAutomation'), (Join-Path $RepoRoot 'scripts4PythonAutomation'))
+
+function Publish-MatrixVersion {
+    param([string] $Version, [string] $Channel, [string] $Minimum)
+    if (-not (Test-Path -LiteralPath (Join-Path $publisher ('packages/' + $Version)))) {
+        New-DevSetupPackage -DistributionRoot $publisher -Version $Version -SourcePaths $payload -Confirm:$false | Out-Null
+    }
+    Set-DevSetupChannel -DistributionRoot $publisher -Channel $Channel -Version $Version -MinimumSupportedVersion $Minimum -Confirm:$false | Out-Null
+    Invoke-MatrixGit -Dir $publisher -Arguments @('add', '-A') | Out-Null
+    Invoke-MatrixGit -Dir $publisher -Arguments @('commit', '--quiet', '-m', ("publish {0} to {1}" -f $Version, $Channel)) | Out-Null
+    Invoke-MatrixGit -Dir $publisher -Arguments @('push', '--quiet', 'origin', 'HEAD:distribution') | Out-Null
+}
+
+Test-Feature -Name 'publish 1.8.0 and push to the distribution branch' -Expected 'True' -Actual {
+    Publish-MatrixVersion -Version '1.8.0' -Channel stable -Minimum '1.8.0'
+    [string]((Test-DevSetupPublishedPackage -DistributionRoot $publisher -Version '1.8.0').IsValid)
+}
+
+Test-Feature -Name 'republishing the same version is refused (immutable)' -Expected 'DISTRIBUTION_VERSION_EXISTS' -Actual {
+    try { New-DevSetupPackage -DistributionRoot $publisher -Version '1.8.0' -SourcePaths $payload -Confirm:$false | Out-Null; 'NO-THROW' }
+    catch { $_.Exception.ErrorCode }
+}
+
+# --- client side ---------------------------------------------------------
+. (Join-Path $RepoRoot 'PythonVenvAutomation/templates/DevSetup.Bootstrap.ps1')
+
+$clientRoot = Join-Path $distRoot 'client'
+New-Item -ItemType Directory -Path $clientRoot -Force | Out-Null
+$clientConfig = Join-Path $clientRoot 'config.json'
+@{
+    CommandName = 'devsetup'; DistributionUri = $origin; DistributionBranch = 'distribution'
+    Channel = 'stable'; AutoUpdateEnabled = $true; AllowOfflineContinue = $true
+} | ConvertTo-Json | Set-Content -LiteralPath $clientConfig -Encoding UTF8
+$clientPaths = Get-DevSetupBootPaths -InstallRoot $clientRoot
+
+Test-Feature -Name 'client clones and activates 1.8.0' -Expected 'True|1.8.0' -Actual {
+    $relaunch = Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false
+    "{0}|{1}" -f $relaunch, (Get-DevSetupBootState -StateFile $clientPaths.StateFile).version
+}
+
+Test-Feature -Name 'second run is a no-op' -Expected 'False' -Actual {
+    [string](Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false)
+}
+
+Test-Feature -Name 'client upgrades to 1.9.0 and keeps the previous version' -Expected 'True|1.9.0|1.8.0' -Actual {
+    Publish-MatrixVersion -Version '1.9.0' -Channel stable -Minimum '1.8.0'
+    $relaunch = Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false
+    $s = Get-DevSetupBootState -StateFile $clientPaths.StateFile
+    "{0}|{1}|{2}" -f $relaunch, $s.version, $s.previousVersion
+}
+
+Test-Feature -Name 'the activated version is importable' -Expected 'True' -Actual {
+    $manifest = Get-DevSetupBootActiveModulePath -Paths $clientPaths
+    [string]($manifest -and (Test-Path -LiteralPath $manifest))
+}
+
+Test-Feature -Name 'offline run keeps working on the installed version' -Expected 'False|1.9.0' -Actual {
+    Rename-Item -LiteralPath $origin -NewName 'origin.git.offline'
+    try {
+        $relaunch = Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false -WarningAction SilentlyContinue
+        "{0}|{1}" -f $relaunch, (Get-DevSetupBootState -StateFile $clientPaths.StateFile).version
+    } finally {
+        Rename-Item -LiteralPath (Join-Path $distRoot 'origin.git.offline') -NewName 'origin.git'
+    }
+}
+
+Test-Feature -Name 'a corrupt release is rejected and the active version survives' -Expected 'False|1.9.0' -Actual {
+    New-DevSetupPackage -DistributionRoot $publisher -Version '1.9.1' -SourcePaths $payload -Confirm:$false | Out-Null
+    $victim = Get-ChildItem -LiteralPath (Join-Path $publisher 'packages/1.9.1/content') -Recurse -File | Select-Object -First 1
+    Add-Content -LiteralPath $victim.FullName -Value '# tampered after checksums were written'
+    # Set-DevSetupChannel would refuse a corrupt package, so write the channel
+    # by hand: this simulates a release that was damaged in transit.
+    $chan = [ordered]@{
+        schemaVersion = 1; product = 'DevSetup'; channel = 'stable'; version = '1.9.1'
+        manifest = 'packages/1.9.1/manifest.json'; minimumSupportedVersion = '1.8.0'
+        force = $false; publishedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Set-Content -LiteralPath (Join-Path $publisher 'channels/stable.json') -Value ($chan | ConvertTo-Json -Depth 5) -Encoding UTF8
+    Invoke-MatrixGit -Dir $publisher -Arguments @('add', '-A') | Out-Null
+    Invoke-MatrixGit -Dir $publisher -Arguments @('commit', '--quiet', '-m', 'corrupt 1.9.1') | Out-Null
+    Invoke-MatrixGit -Dir $publisher -Arguments @('push', '--quiet', 'origin', 'HEAD:distribution') | Out-Null
+
+    $relaunch = Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false
+    "{0}|{1}" -f $relaunch, (Get-DevSetupBootState -StateFile $clientPaths.StateFile).version
+}
+
+Test-Feature -Name 'the failed version is remembered, so it is not retried' -Expected 'True' -Actual {
+    $s = Get-DevSetupBootState -StateFile $clientPaths.StateFile
+    [string](@($s.failedVersions) -contains '1.9.1')
+}
+
+Test-Feature -Name 'a rerun does not loop on the broken version' -Expected 'False' -Actual {
+    [string](Invoke-DevSetupBootAutoUpdate -CommandName devsetup -ConfigPath $clientConfig -Confirm:$false)
+}
+
+Test-Feature -Name 'pilot promotion needs no rebuild' -Expected 'pilot=1.9.0 stable=1.9.1 packages=1.9.1,1.9.0,1.8.0' -Actual {
+    $before = @(Get-DevSetupPublishedVersion -DistributionRoot $publisher)
+    Set-DevSetupChannel -DistributionRoot $publisher -Channel pilot -Version '1.9.0' -MinimumSupportedVersion '1.8.0' -Confirm:$false | Out-Null
+    $after = @(Get-DevSetupPublishedVersion -DistributionRoot $publisher)
+    "pilot={0} stable={1} packages={2}" -f `
+        (Get-DevSetupChannel -DistributionRoot $publisher -Channel pilot).version,
+        (Get-DevSetupChannel -DistributionRoot $publisher -Channel stable).version,
+        ($after -join ',')
+}
+
+# ---------------------------------------------------------------------------
 # 10. Platform-gated features
 # ---------------------------------------------------------------------------
 Set-Group 'Platform-gated features'

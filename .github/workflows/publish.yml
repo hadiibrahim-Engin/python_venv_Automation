@@ -9,10 +9,6 @@ on:
     branches: [ main ]
     tags: [ 'v*' ]
 
-env:
-  PS_REPOSITORY_NAME: GitHubPackages
-  PS_REPOSITORY_URI: https://nuget.pkg.github.com/REPLACE_OWNER/index.json
-
 jobs:
   validate:
     runs-on: windows-latest
@@ -60,32 +56,7 @@ jobs:
           name: installer
           path: install.ps1
 
-  publish:
-    needs: build
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Ensure tooling
-        shell: pwsh
-        run: |
-          if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
-            Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -AllowClobber
-          }
-      - name: Build + publish to GitHub Packages
-        shell: pwsh
-        env:
-          NUGET_API_KEY: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          ./build/Build.ps1 | Out-Null
-          ./build/Publish.ps1 -RepositoryName $env:PS_REPOSITORY_NAME -RepositoryUri $env:PS_REPOSITORY_URI -ApiKey $env:NUGET_API_KEY
-      - name: Attach install.ps1 to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: install.ps1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # NOTE: there is deliberately no publish-to-feed job here. DevSetup is
+  # distributed from this repository's `distribution` branch (see
+  # docs/DISTRIBUTION_ARCHITECTURE.md); a package feed is explicitly not an
+  # end-user installation path. Azure Pipelines owns the release publish.

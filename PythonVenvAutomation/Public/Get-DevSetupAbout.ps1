@@ -20,6 +20,28 @@ function Get-DevSetupAbout {
     $info = Get-PythonVenvSetupInfo
     $config = Get-DevSetupRuntimeConfig
 
+    # A managed installation is authoritative for version, bin directory and
+    # channel; the legacy PSModulePath-based values do not apply to it.
+    $install = Get-DevSetupInstallInfo
+    $installedVersion = $info.InstalledVersion
+    $binDirectory     = $info.BinDirectory
+    $channel          = $(if ($config.PSObject.Properties.Name -contains 'Channel' -and $config.Channel) { $config.Channel } else { 'stable' })
+
+    if ($install.IsManaged) {
+        $installedVersion = $install.Version
+        $binDirectory     = $install.BinDirectory
+        if (Test-Path -LiteralPath $install.ConfigPath -PathType Leaf) {
+            try {
+                $installConfig = Get-Content -LiteralPath $install.ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                if ($installConfig.PSObject.Properties.Name -contains 'Channel' -and $installConfig.Channel) {
+                    $channel = [string]$installConfig.Channel
+                }
+            } catch {
+                Write-Verbose ("about: install config unreadable: {0}" -f $_.Exception.Message)
+            }
+        }
+    }
+
     $packageManager = 'unbekannt'
     $requiresPython = 'unbekannt'
     if ($Script:PythonVenvAutomationEngineLoaded) {
@@ -35,10 +57,11 @@ function Get-DevSetupAbout {
 
     $about = [pscustomobject]@{
         CommandName       = $info.CommandName
-        InstalledVersion  = $info.InstalledVersion
+        InstalledVersion  = $(if ($installedVersion) { $installedVersion } else { 'Quellverzeichnis' })
+        Installation      = $(if ($install.IsManaged) { $install.InstallRoot } else { 'nicht installiert (Quellcheckout)' })
         ModuleRoot        = $info.ModuleRoot
-        BinDirectory      = $info.BinDirectory
-        Channel           = $(if ($config.PSObject.Properties.Name -contains 'Channel' -and $config.Channel) { $config.Channel } else { 'stable' })
+        BinDirectory      = $binDirectory
+        Channel           = $channel
         AutoUpdateEnabled = $info.AutoUpdateEnabled
         AutoUpdatePolicy  = $info.AutoUpdatePolicy
         EngineLoaded      = $info.EngineLoaded

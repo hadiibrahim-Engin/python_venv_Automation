@@ -1,0 +1,4 @@
+  File "<string>", line 9
+    print(YAML parses. stages:, [s[stage] for s in d[stages]])
+          ^^^^^^^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?
