@@ -11,6 +11,7 @@ Reference documentation:
 
 ## Für Endanwender
 
+- [Installation](INSTALLATION.md) — die einmalige Einrichtung und die zwei Befehle, die man kennen muss.
 - [devsetup doctor](DEVSETUP_DOCTOR.md) — read-only Diagnose, Statusbedeutung, Beispielausgabe.
 - [Support Bundle und Fehlercodes](SUPPORT_BUNDLE.md) — `devsetup support`, Redaction-Fluss, alle `DS-`-Codes.
 - [Dependency-Semantik](DEPENDENCY_SEMANTICS.md) — was `devsetup`, `update` und `upgrade` jeweils tun.
@@ -22,6 +23,12 @@ Reference documentation:
 - [PyProject Health und Healing](PYPROJECT_HEALING.md) — Finding-Modell, alle Health-Codes, transaktionales Healing.
 - [Modul-Architektur](MODULE_ARCHITECTURE.md) — Ladereihenfolge, Verantwortlichkeiten, PowerShell-Fallstricke.
 - [Testen und Dummy-Workspace](TESTING_AND_DUMMY_WORKSPACE.md) — Testebenen, Fixtures, Feature-Matrix.
+
+## Für CI / Admin
+
+- [Distributions-Architektur](DISTRIBUTION_ARCHITECTURE.md) — ein Repo, Orphan-Branch, warum keine ZIP, Vertrauenskette, Immutability, Channels.
+- [Self-Update](SELF_UPDATE.md) — was der Client bei jedem Start tut, Entscheidungsmatrix, atomare Aktivierung, Rollback, Locking.
+- [Azure DevOps Distribution](AZURE_DEVOPS_DISTRIBUTION.md) — Pipeline-Stages, Berechtigungen, Release- und Rückzugsablauf.
 - Repository-level overview: [`../../README.md`](../../README.md)
 - Detailed setup pipeline flow: [`../../scripts4PythonAutomation/Flow.md`](../../scripts4PythonAutomation/Flow.md)
 - Example config: [`../../.setup-config.example.json`](../../.setup-config.example.json)

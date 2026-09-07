@@ -4,14 +4,28 @@ Windows-focused PowerShell automation for creating, updating, validating, signin
 
 The distributable module is `PythonVenvAutomation`; the recommended global command is `devsetup`. The legacy entry point `scripts4PythonAutomation\setup-core.ps1` remains available for backward compatibility.
 
+## For end users: two things to know
+
+| When | What |
+|---|---|
+| **Once** | run `Install-DevSetup.cmd` |
+| **From then on** | `devsetup` |
+
+No administrator rights, no PAT, no PowerShell knowledge. Everything is
+installed under `%LOCALAPPDATA%\Company\DevSetup`, and DevSetup keeps itself
+up to date on every run. See
+[Installation](PythonVenvAutomation/docs/INSTALLATION.md).
+
 ## Quick start
 
 ```powershell
-devsetup
-devsetup update
-devsetup upgrade
-devsetup rebuild
-devsetup dry
+devsetup            # make the project ready (does NOT upgrade dependencies)
+devsetup doctor     # check everything, change nothing
+devsetup repair     # apply only the safe fixes
+devsetup upgrade    # deliberately upgrade dependencies
+devsetup rebuild    # recreate .venv
+devsetup about      # version, channel, install path, project status
+devsetup support    # support bundle (contains no credentials)
 ```
 
 Advanced parameters are forwarded after `--`:
@@ -320,11 +334,47 @@ Invoke-PythonVenvSetup
 
 `VERSION` remains the module version source of truth. `build\Update-Version.ps1` keeps the module manifest aligned, and the build validates that they match.
 
-Version tags (`v1.2.3`) are used for release publishing. GitHub Actions and Azure Pipelines separate validation, build, and publish stages; credentials are supplied through secret variables rather than committed configuration.
+Version tags (`v1.2.3`) drive release publishing.
+
+**Distribution stays inside this repository.** Releases are committed to an
+orphan `distribution` branch that shares no history with `main`, so developer
+clones never carry release payloads and the client clones only that branch,
+shallow. There is no second repository, no ZIP and no package feed - git is
+already a content-addressed, immutable transport, and loose files under
+`packages/<version>/content` plus a per-file `SHA256SUMS.txt` give stronger
+guarantees at a fraction of the size.
+
+The Azure pipeline pushes with the Build Service identity
+(`persistCredentials: true`); there is no PAT in any YAML. Published versions
+are immutable, and promoting `pilot` to `stable` only repoints a channel file -
+it never rebuilds.
+
+See [Distribution Architecture](PythonVenvAutomation/docs/DISTRIBUTION_ARCHITECTURE.md)
+and [Azure DevOps Distribution](PythonVenvAutomation/docs/AZURE_DEVOPS_DISTRIBUTION.md).
 
 ## Documentation
 
 - [Documentation index](PythonVenvAutomation/docs/README.md)
+
+**End user**
+- [Installation](PythonVenvAutomation/docs/INSTALLATION.md)
+- [devsetup doctor](PythonVenvAutomation/docs/DEVSETUP_DOCTOR.md)
+- [Support bundle and error codes](PythonVenvAutomation/docs/SUPPORT_BUNDLE.md)
+- [Dependency semantics](PythonVenvAutomation/docs/DEPENDENCY_SEMANTICS.md)
+
+**Developer**
+- [Package manager detection](PythonVenvAutomation/docs/PACKAGE_MANAGER_DETECTION.md)
+- [Python version constraints](PythonVenvAutomation/docs/PYTHON_CONSTRAINTS.md)
+- [pyproject health and healing](PythonVenvAutomation/docs/PYPROJECT_HEALING.md)
+- [Module architecture](PythonVenvAutomation/docs/MODULE_ARCHITECTURE.md)
+- [Testing and the dummy workspace](PythonVenvAutomation/docs/TESTING_AND_DUMMY_WORKSPACE.md)
+
+**CI / Admin**
+- [Distribution architecture](PythonVenvAutomation/docs/DISTRIBUTION_ARCHITECTURE.md)
+- [Self-update](PythonVenvAutomation/docs/SELF_UPDATE.md)
+- [Azure DevOps distribution](PythonVenvAutomation/docs/AZURE_DEVOPS_DISTRIBUTION.md)
+
+**Reference**
 - [Safe Git Synchronization](PythonVenvAutomation/docs/SAFE_GIT_SYNC.md)
 - [Intelligent DigiCert Signing](PythonVenvAutomation/docs/SMART_CODE_SIGNING.md)
 - [Phase 2 Architecture](PythonVenvAutomation/docs/PHASE2_ARCHITECTURE.md)
