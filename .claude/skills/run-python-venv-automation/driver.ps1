@@ -206,7 +206,16 @@ function Invoke-DriverTest {
     if ($result.CodeCoverage) {
         Write-Host ("Coverage: {0:N2}%" -f [double]$result.CodeCoverage.CoveragePercent)
     }
-    foreach ($f in $result.Failed) { Write-Host ("FAIL: {0}" -f $f.ExpandedPath) -ForegroundColor Red }
+    foreach ($f in $result.Failed) {
+        Write-Host ("FAIL: {0}" -f $f.ExpandedPath) -ForegroundColor Red
+        $detail = (($f.ErrorRecord | Out-String) -replace "`r?`n", ' ') -replace '\s+', ' '
+        if ($detail) { Write-Host ("      {0}" -f $detail.Trim()) -ForegroundColor DarkRed }
+    }
+    foreach ($c in $result.Containers) {
+        if ($c.Result -and $c.Result -ne 'Passed') {
+            Write-Host ("CONTAINER FAILED: {0}" -f (Split-Path ([string]$c.Item) -Leaf)) -ForegroundColor Red
+        }
+    }
     if ($result.FailedCount -gt 0) { exit 1 }
 }
 

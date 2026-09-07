@@ -1,7 +1,10 @@
 #Requires -Version 5.1
-BeforeAll { $repoRoot = Split-Path -Parent $PSScriptRoot }
-
 Describe 'PowerShell source syntax' {
+    # -ForEach is built during DISCOVERY, where a BeforeAll variable does not
+    # exist yet. Using $PSScriptRoot directly keeps this file runnable on its
+    # own; the previous version only worked when the caller happened to have a
+    # variable named $repoRoot in scope.
+    $repoRoot = Split-Path -Parent $PSScriptRoot
     $cases = @(
         Get-ChildItem -LiteralPath $repoRoot -Recurse -File |
             Where-Object { $_.Extension -in @('.ps1','.psm1','.psd1') -and $_.FullName -notmatch '[\\/]artifacts[\\/]' } |

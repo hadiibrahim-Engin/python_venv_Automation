@@ -41,6 +41,7 @@ $moduleLoadOrder = @(
     'PackageManager',
     'Redaction',
     'SupportCodes',
+    'Distribution',
     'PyProjectHealth',
     'Diagnostics',
     'Prechecks',

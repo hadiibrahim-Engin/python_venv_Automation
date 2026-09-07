@@ -160,12 +160,14 @@ Describe 'Bootstrap (pre-import) decision + relaunch guard' {
         . $Boot
     }
 
-    It 'LatestStable ignores prerelease by default (stable comparison)' {
-        $d = Get-DevSetupBootDecision -Policy LatestStable -Installed ([version]'1.2.0') -Available ([version]'1.2.0')
+    # The distribution-based decision matrix is covered in full by
+    # Bootstrap.Tests.ps1; these two just pin the shim-facing contract.
+    It 'does nothing when the installed version already matches the channel' {
+        $d = Get-DevSetupBootDecision -InstalledVersion '1.2.0' -ChannelVersion '1.2.0' -MinimumSupportedVersion '1.0.0'
         $d.Action | Should -Be 'none'
     }
-    It 'Pinned installs the exact missing version' {
-        $d = Get-DevSetupBootDecision -Policy Pinned -Installed ([version]'1.5.0') -Available ([version]'1.5.0') -RequiredVersion ([version]'1.2.0') -PinnedInstalled $false
+    It 'installs when nothing is installed yet' {
+        $d = Get-DevSetupBootDecision -InstalledVersion $null -ChannelVersion '1.2.0' -MinimumSupportedVersion '1.0.0'
         $d.Action | Should -Be 'install'
     }
     It 'derives a loop-guard env var name from the command name' {
